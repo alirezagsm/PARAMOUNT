@@ -19,14 +19,15 @@ def main():
     """
     path_results_pod = ".usv"
     path_viz = ".viz"
-    modelist = range(5)
+    modelist = range(11)
     dt = 4e-5
-    bounds = [-0.075, 0.075, 0, 0.43, 2.5e-4]
+    bounds = [-0.075, 0.075, -0.05, 0.43, 2.5e-4]
     varlist = POD.get_folderlist(path_results_pod, boolPrint=True)
-    variables = varlist[0]
+    variables = varlist
     pod = POD()
     pod.set_time(dt)
-    pod.svd_viz(variables, modelist, dt, bounds, path_results_pod, path_viz=path_viz)
+    pod.set_viz_params(dpi=600, linewidth=0.65, color="k", cmap="seismic")
+    pod.svd_viz(variables, modelist, bounds, path_results_pod, path_viz=path_viz)
 
 
 if __name__ == "__main__":
