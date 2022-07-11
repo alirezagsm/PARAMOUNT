@@ -10,6 +10,7 @@ import webbrowser
 from tqdm import tqdm
 import shutil
 import logging
+import os
 
 # suppress dask user warnings
 logging.getLogger("distributed.utils_perf").setLevel(logging.CRITICAL)
@@ -61,7 +62,7 @@ class POD:
 
         print(client.cluster)
         print(client.dashboard_link)
-        webbrowser.open(cluster.dashboard_link, new=2)
+        # webbrowser.open(cluster.dashboard_link, new=2)
 
         return cluster, client
 
@@ -264,10 +265,8 @@ class POD:
         self,
         variables,
         modelist,
-        dt,
         bounds,
         path_results_pod=".usv",
-        t0=0,
         path_viz=".viz",
     ):
         """
@@ -279,7 +278,6 @@ class POD:
             dt (float): timestep of data acquisition
             bounds (list): domain bounds for visualization [xmin, xmax, ymin, ymax, resolution]
             path_results_pod (str, optional): path to read SVD results from. Defaults to ".usv".
-            t0 (int, optional): initial time to use in visualization. Defaults to 0.
         """
         variables = variables if type(variables) is list else [variables]
         modelist = modelist if type(modelist) is list else list(modelist)
@@ -288,6 +286,10 @@ class POD:
         path_y = Path.cwd() / path_results_pod / "y.pkl"
         x = utils.loadit(path_x)
         y = utils.loadit(path_y)
+
+        if not os.path.exists(f"{path_viz}"):
+            os.makedirs(f"{path_viz}")
+
         for var in tqdm(variables, "Visualizing POD modes"):
 
             path_u = Path.cwd() / path_results_pod / f"{var}" / "u"
@@ -298,10 +300,13 @@ class POD:
             v = dd.read_parquet(path_v, engine="pyarrow")
             s = utils.loadit(path_s)
 
-            self.uv_viz(x, y, u, v, f"{path_viz}/{var}", modelist, bounds)
-            self.s_viz(s, f"{path_viz}/{var}", modelist)
+            if not os.path.exists(f"{path_viz}/{var}"):
+                os.makedirs(f"{path_viz}/{var}")
 
-    def set_time(self, dt, t0):
+            self.uv_viz(x, y, u, v, f"{path_viz}/{var}", modelist, bounds)
+            self.s_viz(s, f"{path_viz}/{var}")
+
+    def set_time(self, dt, t0=0):
         """
         set_time set timestep and initial time of data acquisiton
 
@@ -311,6 +316,21 @@ class POD:
         """
         self.dt = dt
         self.t0 = t0
+
+    def set_viz_params(self, dpi=300, linewidth=1.5, color="k", cmap="jet"):
+        """
+        set_viz_params set visualization parameters
+
+        Args:
+            dpi (int, optional): dpi to save figures. Defaults to 300.
+            linewidth (float, optional): line width. Defaults to 1.5.
+            color (str, optional): line color. Defaults to 'k'.
+            cmap (str, optional): color map to use. Defaults to 'jet'.
+        """
+        self.dpi = dpi
+        self.linewidth = linewidth
+        self.color = color
+        self.cmap = cmap
 
     def uv_viz(self, x, y, u, v, path_viz, modelist, bounds):
         """
@@ -331,8 +351,8 @@ class POD:
 
         import matplotlib.pyplot as plt
 
-        plt.rc("font", family="Arial")
-        plt.rc("font", size=9)
+        plt.rc("font", family="Times New Roman")
+        plt.rc("font", size=10)
 
         # define 2D bounds and resolution
 
@@ -353,15 +373,14 @@ class POD:
 
         for mode in modelist:
             uu = u.iloc[:, mode].compute()
-            zz = griddata((x, y), uu, (xx, yy), method="linear")
+            zz = griddata((x, y), uu, (xx, yy), method="cubic", fill_value=np.nan)
 
             fig, ax = plt.subplots(1)
             fig.set_size_inches(3, 4)
             fig.patch.set_facecolor("w")
-            fig.dpi = 300
             ax.set_xlabel("")
             ax.set_ylabel("")
-            ax.set_title(f"u {mode}")
+            # ax.set_title(f"u {mode}")
             ax.axes.xaxis.set_visible(False)
             ax.axes.yaxis.set_visible(False)
             ax.set_xlim(xmin, xmax)
@@ -369,10 +388,12 @@ class POD:
             ax.set_aspect(1)
             ax.set_axisbelow(True)
             ax.grid(alpha=0.5)
-
-            ax.contourf(xx, yy, zz, 20, cmap="viridis")
+            zz[np.isnan(zz)] = np.min(abs(zz))
+            ax.contourf(xx, yy, zz, 50, cmap=self.cmap)
             fig.tight_layout()
-            plt.savefig(f"{path_viz}/u{mode}" + ".png")
+            for axis in ["top", "bottom", "left", "right"]:
+                ax.spines[axis].set_linewidth(self.linewidth)
+            plt.savefig(f"{path_viz}/u{mode}" + ".png", dpi=self.dpi)
 
             vv = v.compute().iloc[mode, :]
             tt = np.arange(self.t0, vv.shape[0] * self.dt, self.dt)
@@ -380,12 +401,11 @@ class POD:
             fig, ax = plt.subplots(2, 1)
             fig.set_size_inches(4, 6)
             fig.patch.set_facecolor("w")
-            fig.dpi = 150
             ax[0].set_xlabel("Time [s]")
             ax[0].set_ylabel("Coefficient")
-            ax[0].set_title(f"v {mode}")
+            # ax[0].set_title(f"v {mode}")
             ax[0].grid(alpha=0.5)
-            ax[0].plot(tt, vv, "k")
+            ax[0].plot(tt, vv, self.color, linewidth=self.linewidth)
 
             ax[1].set_xlabel("Frequency [Hz]")
             ax[1].set_ylabel("Power Spectral Density [db/Hz]")
@@ -396,8 +416,8 @@ class POD:
                 vv, Fs=1 / self.dt, window=mlab.window_hanning, detrend="linear"
             )
             dbPxx = 10 * np.log10(Pxx)
-            peaks, _ = find_peaks(dbPxx)
-            ax[1].plot(freqs, dbPxx, "k")
+            peaks, _ = find_peaks(dbPxx, prominence=3)
+            ax[1].plot(freqs, dbPxx, self.color, linewidth=self.linewidth)
             npeaks = 2
             for n in range(0, npeaks):
                 ax[1].scatter(
@@ -405,15 +425,20 @@ class POD:
                     dbPxx[peaks[n]],
                     s=80,
                     facecolors="none",
-                    edgecolors="r",
+                    edgecolors="grey",
                 )
                 ax[1].annotate(
                     f"{freqs[peaks[n]]:0.0f}",
                     xy=(freqs[peaks[n]] * 1.01, dbPxx[peaks[n]] * 1.01),
                 )
             fig.tight_layout()
-            plt.show()
-            plt.savefig(f"{path_viz}/v{mode}" + ".png")
+            for i in range(2):
+                for axis in ["bottom", "left"]:
+                    ax[i].spines[axis].set_linewidth(self.linewidth)
+                for axis in ["top", "right"]:
+                    ax[i].spines[axis].set_linewidth(0)
+            # plt.show()
+            plt.savefig(f"{path_viz}/v{mode}" + ".png", dpi=self.dpi)
 
     def s_viz(self, s, path_viz, modelist=20):
         """
@@ -426,22 +451,23 @@ class POD:
         """
         import matplotlib.pyplot as plt
 
-        plt.rc("font", family="Arial")
-        plt.rc("font", size=9)
+        plt.rc("font", family="Times New Roman")
+        plt.rc("font", size=10)
 
         fig, ax = plt.subplots(1)
         fig.set_size_inches(4, 3)
         fig.patch.set_facecolor("w")
-        fig.dpi = 300
         ax.set_xlabel("Mode")
         ax.set_ylabel("Energy")
         ax.set_yscale("log")
-        ax.set_title(f"s")
-        ax.set_aspect(1)
         ax.set_axisbelow(True)
-        ax.grid(alpha=0.5)
+        ax.grid(alpha=0.5, which="both")
 
-        ax.plot(s[:modelist])
+        ax.plot(s[:modelist], self.color, linewidth=self.linewidth)
         fig.tight_layout()
-        plt.show()
-        plt.savefig(f"{path_viz}/s" + ".png")
+        for axis in ["bottom", "left"]:
+            ax.spines[axis].set_linewidth(self.linewidth)
+        for axis in ["top", "right"]:
+            ax.spines[axis].set_linewidth(0)
+        # plt.show()
+        plt.savefig(f"{path_viz}/s" + ".png", dpi=self.dpi)
