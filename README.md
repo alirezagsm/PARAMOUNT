@@ -49,19 +49,9 @@ Project
 │   └── y.pkl
 ├── .viz
 │   ├── variable 1
-│   │   ├── s
-│   │   │   └── .png
-│   │   ├── u
-│   │   │   └── .png
-│   │   └── v
-│   │       └── .png
+│   │   └── results.png   
 │   └── variable 2
-│       ├── s
-│       │   └── .png
-│       ├── u
-│       │   └── .png
-│       └── v
-│           └── .png
+│       └── results.png         
 └── src
     ├── PARAMOUNT.py
     └── utils.py
