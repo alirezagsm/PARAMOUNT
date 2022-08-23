@@ -16,7 +16,7 @@ logging.getLogger("distributed.utils_perf").setLevel(logging.CRITICAL)
 logging.getLogger("distributed.diskutils").setLevel(logging.CRITICAL)
 logging.getLogger("distributed.worker_memory").setLevel(logging.CRITICAL)
 
-# help pd output fit in console
+# help pd output better fit in console
 pd.set_option("display.max_colwidth", 20)
 
 
@@ -31,16 +31,20 @@ class POD:
 
     Available Functions
     ----------
-    create_cluster
     read_csv_coordinates
-    remove_coordinate_variables
-    read_csv_columns
-    get_folderlist
     csv_to_parquet
+    extract_csv_sequential
+    read_csv_sequential
     check_parquet
+    correlate
     svd_save_usv
-    set_time
+    svd_correlation
+    correlation_signals
+    svd_correlation_2X
+    svd_correlation_signals
+    read_csv_columns
     svd_viz
+    s_viz_combined
 
     """
 
@@ -74,55 +78,24 @@ class POD:
 
         return cluster, client
 
-    def read_csv_coordinates(self, df):
-        """
-        read_csv_coordinates read x y z cooridinates from dataframe
-
-        Args:
-            df (dataframe): dataframe containing cooridinates
-
-        Returns:
-            tuple: x, y, z series
-        """
-        strlist = ["x", "y", "z"]
-        for item in df.columns:  # get node XYZ
-            if re.match(r"\s*" + strlist[0], item, re.IGNORECASE):
-                x = df[item]
-                continue
-            if re.match(r"\s*" + strlist[1], item, re.IGNORECASE):
-                y = df[item]
-                continue
-            if re.match(r"\s*" + strlist[2], item, re.IGNORECASE):
-                z = df[item]
-                continue
-        return x, y, z
-
-    def remove_coordinate_variables(self, variables):
-        """
-        remove_coordinate_variables remove coordinate entries from variables list
-
-        Returns:
-            list: cleaned list of variables
-        """
-        strlist = ["x", "y", "z"]
-        for item in variables[:]:  # get node XYZ
-            if re.match(r"\s*" + strlist[0], item, re.IGNORECASE):
-                variables.remove(item)
-                continue
-            if re.match(r"\s*" + strlist[1], item, re.IGNORECASE):
-                variables.remove(item)
-                continue
-            if re.match(r"\s*" + strlist[2], item, re.IGNORECASE):
-                variables.remove(item)
-                continue
-        return variables
-
     @staticmethod
     def read_csv_columns(
         path_csv=Path.cwd(), skiprows=0, delimiter=",", boolPrint=True
     ):
         """
         read_csv_columns get columns of a csv file and print the headers
+
+
+        Args:
+            path_csv (str, optional): path to folder containing csv files. Defaults to Path.cwd().
+            skiprows (int, optional): rows to skip in each csv file. Defaults to 0.
+            delimiter (str, optional): delimiter used in csv files. Defaults to ",".
+            boolPrint (bool, optional): whether to print our the columns. Defaults to True.
+
+        Returns:
+            list: the headers found in the first csv file
+        """
+        """
 
         Returns:
             list: headers in csv file
@@ -148,6 +121,9 @@ class POD:
             list: list of available folders
         """
         files = Path.cwd() / path
+        if not files.is_dir():
+            os.makedirs(files)
+
         folderlist = [f for f in files.iterdir() if f.is_dir()]
         folderlist = [folder.parts[-1] for folder in folderlist]
         if boolPrint:
@@ -157,6 +133,7 @@ class POD:
     def csv_to_parquet(
         self,
         variables,
+        coordinates="2D",
         path_csv=Path.cwd(),
         path_parquet=".data",
         i_start=0,
@@ -165,20 +142,41 @@ class POD:
         skiprows=0,
     ):
         """
-        read all csv files in path and save desired variables in parquet format
+        csv_to_parquet read all csv files in path and save desired variables in parquet format
+        x, y, z spatial values are read from the first csv file
+
+
+        Args:
+            variables (list): list of variables to consider
+            coordiantes (str): catresian coordinates to store e.g. 2D for 'xy' and 3D for 'xyz'.
+            path_csv (_type_, optional): _description_. Defaults to Path.cwd().
+            path_parquet (str, optional): _description_. Defaults to ".data".
+            i_start (int, optional): _description_. Defaults to 0.
+            i_end (_type_, optional): _description_. Defaults to None.
+            delimiter (str, optional): _description_. Defaults to ",".
+            skiprows (int, optional): _description_. Defaults to 0.
 
         Raises:
             ValueError: checking for existing folders and warn user about unwanted overwrites
         """
+
         variables = variables if type(variables) is list else [variables]
+
+        self.make_dim(coordinates)
+
+        utils.ensure_dir(path_parquet)
+
+        v_ = variables.copy()
         for var in variables:
-            if var.strip() in str(list((Path.cwd() / path_parquet).glob("*"))):
-                while (
-                    input(f"{var.strip()} folder already exists! Continue? [y/n]")
-                    != "y"
-                ):
-                    self.client.shutdown()
-                    raise ValueError("please correct your variable list")
+            if var in self.get_folderlist(path=path_parquet, boolPrint=False):
+                choice = input(
+                    f"{var.strip()} folder already exists! overwrite existing files? [y/n] "
+                )
+                if choice.lower().strip() == "y":
+                    shutil.rmtree(Path.cwd() / path_parquet / var)
+                else:
+                    v_.remove(var)
+        variables = v_
 
         pathlist = sorted(Path(path_csv).resolve().glob("*.csv"))
         if i_end is not None:
@@ -189,19 +187,34 @@ class POD:
         else:
             pathlist = pathlist[i_start:]
 
-        x, y, z = self.read_csv_coordinates(
-            pd.read_csv(pathlist[0], sep=delimiter, skiprows=skiprows)
-        )
-        utils.saveit(x, f"{path_parquet}/x.pkl")
-        utils.saveit(y, f"{path_parquet}/y.pkl")
-        variables = self.remove_coordinate_variables(variables)
+        df = pd.read_csv(pathlist[0], sep=delimiter, skiprows=skiprows)
 
-        for var in tqdm(variables, "writing parquet database"):
-            results = []
-            for path_csv in pathlist:
+        try:
+            for item in df.columns:
+                if re.match(r"\s*" + "x", item, re.IGNORECASE):
+                    variables.remove(item)
+                    if "x" in self.dim:
+                        utils.saveit(df[item], f"{path_parquet}/x.pkl")
+                if re.match(r"\s*" + "y", item, re.IGNORECASE):
+                    variables.remove(item)
+                    if "y" in self.dim:
+                        utils.saveit(df[item], f"{path_parquet}/y.pkl")
+                if re.match(r"\s*" + "z", item, re.IGNORECASE):
+                    variables.remove(item)
+                    if "z" in self.dim:
+                        utils.saveit(df[item], f"{path_parquet}/z.pkl")
+        except Exception as e:
+            print(f"warning: you did not specify all coordinate variables: {e}")
+
+        results = [[] for x in range(len(variables))]
+
+        for path_csv in tqdm(pathlist, "analyzing csv files"):
+            for i, var in enumerate(variables):
                 result = dd.read_csv(path_csv, sep=delimiter, skiprows=skiprows)
-                results.append(result[var])
-            df = dd.concat(results, axis=1, ignore_unknown_divisions=True)
+                results[i].append(result[var])
+
+        for i, var in enumerate(tqdm(variables, "writing parquet database")):
+            df = dd.concat(results[i], axis=1, ignore_unknown_divisions=True)
             df.columns = [path.stem for path in pathlist]
             dd.to_parquet(
                 df.repartition(partition_size="150MB", force=True),
@@ -209,6 +222,96 @@ class POD:
                 compression="snappy",
                 write_metadata_file=True,
             )
+
+    @staticmethod
+    def extract_csv_sequential(
+        path_csv=Path.cwd(),
+        path_save=".data",
+        delimiter=",",
+        x0=0,
+        y0=0,
+        z0=0,
+        tol=1e-3,
+        skiprows=0,
+    ):
+        """
+        extract_csv_sequential extract data from a point in sequential manner
+
+        Args:
+            path_csv (str, optional): path to csv database. Defaults to Path.cwd().
+            path_save (str, optional): path to save resutls to. Defaults to ".data".
+            delimiter (str, optional): delimiter used in csv files. Defaults to ",".
+            x0 (float, optional): targer x coordinate. Defaults to 0.
+            y0 (float, optional): targer y coordinate. Defaults to 0.
+            z0 (float, optional): targer z coordinate. Defaults to 0.
+            tol (float, optional): tolerance for point detection. Defaults to 1e-3.
+            skiprows (int, optional): rows to skip in csv files. Defaults to 0.
+        """
+        pathlist = sorted(Path(path_csv).resolve().glob("*.csv"))
+
+        df = pd.read_csv(pathlist[0], sep=delimiter, skiprows=skiprows)
+
+        x = df.iloc[:, 0]
+        y = df.iloc[:, 1]
+
+        tol = 1e-3
+
+        for i in range(len(x)):
+            if abs(x[i] - x0) < tol and abs(y[i] - y0) < tol:
+                index = i
+                break
+
+        variables = df.columns[3:]
+
+        results = []
+        for path_csv in tqdm(pathlist, "analyzing csv files"):
+            result = pd.read_csv(path_csv, sep=delimiter, skiprows=skiprows)
+            results.append(result.iloc[index, :])
+        results = pd.concat(results, axis=1)
+        results.columns = [path.stem for path in pathlist]
+        results = results.T
+        print(results)
+        utils.ensure_dir(path_save)
+        for var in variables:
+            utils.saveit(results[var], f"{path_save}/{var}")
+
+    @staticmethod
+    def read_csv_sequential(
+        path_csv=Path.cwd(),
+        path_save=".data",
+        delimiter=",",
+        skiprows=0,
+    ):
+        """
+        read_csv_sequential read values from csv database that is not clean
+        and had units e.g. 3.123 [m/s] in each row
+
+        Args:
+            path_csv (str, optional): path to csv database. Defaults to Path.cwd().
+            path_save (str, optional): path to save resutls to. Defaults to ".data".
+            delimiter (str, optional): elimiter used in csv files. Defaults to ",".
+            skiprows (int, optional):  rows to skip in csv files. Defaults to 0.
+        """
+        pathlist = sorted(Path(path_csv).resolve().glob("*.csv"))
+
+        df = pd.read_csv(pathlist[0], sep=delimiter, skiprows=skiprows)
+        df.applymap(lambda x: float(re.sub(r"\[(.*?)\]", "", x)))
+        print(df.head())
+        headers = df.columns.tolist()
+        print(pd.DataFrame({"Available headers": headers}))
+        variables = headers
+
+        results = [[] for x in range(len(variables))]
+        for path_csv in tqdm(pathlist, "analyzing csv files"):
+            for i, var in enumerate(variables):
+                result = pd.read_csv(path_csv, sep=delimiter, skiprows=skiprows)
+                result = result.applymap(lambda x: float(re.sub(r"\[(.*?)\]", "", x)))
+                results[i].append(result[var][0])
+
+        for i, var in enumerate(variables):
+            utils.ensure_dir(path_save)
+            print(f"saving {var} {results[i][:10]}")
+            utils.saveit(results[i], f"{path_save}/{var.strip()}")
 
     @staticmethod
     def check_parquet(path_parquet=".data"):
@@ -225,6 +328,36 @@ class POD:
             print(df.head())
             print(len(df))
 
+    def correlate(self, v1, v2):
+        """
+        correlate find pearson's correlation as well as maximum correlation found for a time lag between signals
+
+        Args:
+            v1 (series): first variables time series
+            v2 (series): second variables time series
+
+        Returns:
+            (tuple): pearson's index, maximum correlation
+        """
+        from scipy import signal
+
+        corr = (
+            signal.correlate(v1 - np.mean(v1), v2 - np.mean(v2), mode="full")
+            / len(v1)
+            / np.std(v1)
+            / np.std(v2)
+        )
+        corr_smooth = (
+            pd.DataFrame(corr)
+            .rolling(window=max(int(len(v1) * 0.01), 5), center=True, closed="both")
+            .mean()
+        )
+        lagindex = corr_smooth.iloc[:, 0].argmax()
+
+        corrcoef = corr[int(len(corr) / 2)]
+        corrcoef_adj = corr[lagindex]
+        return corrcoef, corrcoef_adj
+
     def svd_save_usv(
         self,
         variables,
@@ -232,7 +365,7 @@ class POD:
         path_results_pod=".usv",
     ):
         """
-        svd_save_usv compute distributed Singular Value Decomposition and store results in parquet format
+        svd_save_usv compute distributed Singular Value Decomposition and store results in parquet format.
 
         Args:
             variables (list or str): list of variables to consider
@@ -243,17 +376,26 @@ class POD:
             ValueError: checking for existing folders and warn user about unwanted overwrites
         """
         variables = variables if type(variables) is list else [variables]
+        v_ = variables.copy()
         for var in variables:
-            if var in str(list((Path.cwd() / path_results_pod).glob("*"))):
-                while (
-                    input(f"{var.strip()} folder already exists! Continue? [y/n]")
-                    != "y"
-                ):
-                    self.client.shutdown()
-                    raise ValueError("please correct your variable list")
-        shutil.copy(Path.cwd() / path_parquet / "x.pkl", path_results_pod)
-        shutil.copy(Path.cwd() / path_parquet / "y.pkl", path_results_pod)
-        for var in tqdm(variables, "calculating POD modes"):
+            if var in self.get_folderlist(path=path_results_pod, boolPrint=False):
+                choice = input(
+                    f"{var.strip()} folder already exists! overwrite existing files? [y/n] "
+                )
+                if choice.lower().strip() == "y":
+                    shutil.rmtree(Path.cwd() / path_results_pod / var)
+                else:
+                    v_.remove(var)
+        variables = v_
+
+        try:
+            shutil.copy(Path.cwd() / path_parquet / "x.pkl", path_results_pod)
+            shutil.copy(Path.cwd() / path_parquet / "y.pkl", path_results_pod)
+            shutil.copy(Path.cwd() / path_parquet / "z.pkl", path_results_pod)
+        except:
+            pass
+
+        for var in tqdm(variables, "computing SVD modes"):
             path = Path.cwd() / path_parquet / f"{var}"
             df = dd.read_parquet(path, engine="pyarrow")
             u, s, v = da.linalg.svd(df.values)
@@ -269,15 +411,546 @@ class POD:
                 )
             utils.saveit(s.compute(), f"{path_results_pod}/{var}/s.pkl")
 
+    def svd_correlation(
+        self, variables, maxmode=5, path_results_pod=".usv", path_viz=".viz"
+    ):
+        """
+        svd_correlation produces correlation heatmap between modes for specified variables.
+        The correlation map shows the default Pearson's correlation between mode pairs on the lower triangle
+        Upper triangle shows the maximum correlation coefficient accounting for time lag between mode pairs
+
+
+        Args:
+            variables (list): list of variables to consider in the correlation map
+            maxmode (int, optional): maximum number of modes to consider in the correlation map. Defaults to 5.
+            path_results_pod (str, optional):  path to read SVD results from. Defaults to ".usv".
+            path_viz (str, optional): path to store plots in. Defaults to ".viz".
+        """
+
+        import matplotlib.pyplot as plt
+        from matplotlib.ticker import AutoMinorLocator, FuncFormatter
+        from mpl_toolkits.axes_grid1 import make_axes_locatable
+        from itertools import combinations
+        from scipy import signal
+
+        plt.rc("font", family=self.font)
+        plt.rc("font", size=self.fontsize)
+
+        utils.ensure_dir(path_viz)
+
+        variables = variables if type(variables) is list else [variables]
+        path_v = Path.cwd() / path_results_pod / f"{variables[0]}" / "v"
+        df = dd.read_parquet(path_v, engine="pyarrow")
+        df = df.compute().iloc[:maxmode, :].transpose()
+        for v in variables[1:]:
+            path_v = Path.cwd() / path_results_pod / f"{v}" / "v"
+            df2 = dd.read_parquet(path_v, engine="pyarrow")
+            df2 = df2.compute().iloc[:maxmode, :].transpose()
+            df = pd.concat([df, df2], axis=1)
+        df = df.dropna()
+        results = []
+        combs = list(combinations(range(len(df.columns)), 2))
+        for comb in combs:
+            v1 = df.iloc[:, comb[0]]
+            v2 = df.iloc[:, comb[1]]
+            _, corrcoef_adj = self.correlate(v1, v2)
+            results.append(
+                [
+                    comb,
+                    corrcoef_adj,
+                    # lag * self.dt,
+                ]
+            )
+        corr_adjusted = pd.DataFrame(np.nan, columns=df.columns, index=df.columns)
+        for result in results:
+            corr_adjusted.iat[result[0][0], result[0][1]] = result[1]
+        corr = df.corr()
+        corr = corr.where(np.tril(np.ones(corr.shape), k=0).astype(np.bool)).abs()
+        fig, ax = plt.subplots()
+        fig.set_size_inches(self.width * 2, self.width * 2)
+        fig.patch.set_facecolor("w")
+
+        ax2 = ax.imshow(corr, interpolation="none", aspect="equal")
+        ax1 = ax.imshow(corr_adjusted, interpolation="none", aspect="equal")
+        ax2.set_clim(0, 1)
+        ax1.set_clim(0, 1)
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes("right", size="5%", pad="4%")
+        cbar = fig.colorbar(ax1, cax=cax)
+        cbar.ax.set_xlabel("Correlation Coefficient")
+        for i in range(1, len(variables)):
+            ax.axhline(i * maxmode - 0.5, color="w")
+            ax.axvline(i * maxmode - 0.5, color="w")
+
+        varlabels = []
+        for var in variables:
+            label = re.sub(r"\[(.*?)\]", "", var)
+            label = re.sub(r"\.", " ", label)
+            varlabels.append(label)
+
+        majorloc = np.arange(
+            np.floor(maxmode / 2),
+            maxmode * len(variables) + np.floor(maxmode / 2),
+            step=maxmode,
+        )
+        ax.xaxis.set_ticks(majorloc, varlabels)
+        ax.yaxis.set_ticks(
+            majorloc,
+            varlabels,
+            rotation=90,
+            va="center",
+        )
+        ax.xaxis.set_minor_locator(AutoMinorLocator(maxmode))
+        ax.yaxis.set_minor_locator(AutoMinorLocator(maxmode))
+
+        indexskip = int((maxmode + 1) / 5)
+        ax.xaxis.set_minor_formatter(
+            FuncFormatter(
+                lambda x, pos: f"{x % maxmode:.0f}"
+                if (x % maxmode) in np.arange(0, maxmode - 1, indexskip)
+                else ""
+            )
+        )
+        ax.yaxis.set_minor_formatter(
+            FuncFormatter(
+                lambda x, pos: f"{x % maxmode:.0f}"
+                if (x % maxmode) in np.arange(0, maxmode - 1, indexskip)
+                else ""
+            )
+        )
+        ax.xaxis.remove_overlapping_locs = False
+        ax.yaxis.remove_overlapping_locs = False
+        ax.tick_params(axis="both", which="both", length=7)
+        ax.tick_params(axis="both", which="major", pad=20)
+
+        plt.savefig(
+            f"{path_viz}/correlation_{maxmode}" + ".png",
+            dpi=self.dpi,
+            bbox_inches="tight",
+        )
+        plt.close("all")
+
+    def correlation_signals(
+        self,
+        path_signals=".signals",
+        path_signals2=".signals2",
+        path_viz=".viz",
+    ):
+        """
+        correlation_signals plot correlation heatmap between signals.
+        The signals are assumed to be in pickled format in two folders
+
+        Args:
+            path_signals (str, optional): folder for first set of signals. Defaults to ".usv".
+            path_signals2 (str, optional): folder for second set of signals. Defaults to ".usv2".
+            path_viz (str, optional): path to store plots in. Defaults to ".viz".
+        """
+        import matplotlib.pyplot as plt
+        from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+        utils.ensure_dir(path_viz)
+
+        pathlist = Path(path_signals).resolve().glob("*")
+        pathlist2 = Path(path_signals2).resolve().glob("*")
+
+        signals = []
+        for path in pathlist:
+            signals.append(pd.Series(utils.loadit(path), name=path.name))
+        signaldf = pd.concat(signals, axis=1)
+
+        signals = []
+        for path in pathlist2:
+            signals.append(pd.Series(utils.loadit(path), name=path.name))
+        signaldf2 = pd.concat(signals, axis=1)
+
+        dfcorr_adjusted = pd.DataFrame(
+            np.nan, columns=range(signaldf.shape[1]), index=range(signaldf2.shape[1])
+        )
+        dfcorr = pd.DataFrame(
+            np.nan, columns=range(signaldf.shape[1]), index=range(signaldf2.shape[1])
+        )
+
+        for i in tqdm(range(signaldf.shape[1]), "computing correlations"):
+            for j in range(signaldf2.shape[1]):
+                v1 = signaldf.iloc[:, i]
+                v2 = signaldf2.iloc[:, j]
+                corrcoef, corrcoef_adj = self.correlate(v1, v2)
+                dfcorr.iat[i, j] = corrcoef
+                dfcorr_adjusted.iat[i, j] = corrcoef_adj
+
+        for name, df in zip(["corr", "corr_adjusted"], [dfcorr, dfcorr_adjusted]):
+            fig, ax = plt.subplots()
+            fig.set_size_inches(
+                self.width * signaldf.shape[1] / signaldf2.shape[1], self.width
+            )
+            fig.patch.set_facecolor("w")
+
+            ax1 = ax.imshow(df.abs(), interpolation="none", aspect="equal")
+            ax1.set_clim(0, 1)
+            divider = make_axes_locatable(ax)
+            cax = divider.append_axes(
+                "right",
+                size=self.width * 5 / 100,
+                pad=self.width * 2 / 100,
+            )
+            cbar = fig.colorbar(ax1, cax=cax)
+            cbar.ax.set_xlabel("Correlation Coefficient")
+
+            for i in range(1, 1 + signaldf.shape[1]):
+                ax.axhline(i - 0.5, color="w")
+            for i in range(1, 1 + signaldf2.shape[1]):
+                ax.axvline(i - 0.5, color="w")
+
+            sigloc = np.arange(
+                0,
+                signaldf.shape[1],
+                step=1,
+            )
+            sigloc2 = np.arange(
+                0,
+                signaldf2.shape[1],
+                step=1,
+            )
+            ax.xaxis.set_ticks(
+                sigloc,
+                signaldf.columns,
+                rotation=90,
+                ha="center",
+            )
+            ax.yaxis.set_ticks(
+                sigloc2,
+                signaldf2.columns,
+            )
+
+            ax.xaxis.remove_overlapping_locs = True
+            ax.yaxis.remove_overlapping_locs = False
+
+            plt.savefig(
+                f"{path_viz}/Sigs_{name}" + ".png",
+                dpi=self.dpi,
+                bbox_inches="tight",
+            )
+            plt.close("all")
+
+    def svd_correlation_2X(
+        self,
+        variables,
+        maxmode=11,
+        path_results_pod=".usv",
+        path_results_pod2=".usv2",
+        path_viz=".corr2X",
+    ):
+        """
+        svd_correlation_2X pairwise correlation map between two separe SVD results.
+
+        Args:
+            variables (list): variables to consider
+            maxmode (int, optional): maximum mode number to include in analysis. Defaults to 11.
+            path_results_pod (str, optional): first results folder. Will be shown as the y axis. Defaults to ".usv".
+            path_results_pod2 (str, optional): second results folder. Will be shown as the x axis. Defaults to ".usv2".
+            path_viz (str, optional): path to store plots in. Defaults to ".corr2X".
+        """
+        import matplotlib.pyplot as plt
+        from matplotlib.ticker import AutoMinorLocator, FuncFormatter
+        from mpl_toolkits.axes_grid1 import make_axes_locatable
+        from scipy import signal
+
+        plt.rc("font", family=self.font)
+        plt.rc("font", size=self.fontsize)
+
+        utils.ensure_dir(path_viz)
+
+        variables = variables if type(variables) is list else [variables]
+
+        path_v = Path.cwd() / path_results_pod / f"{variables[0]}" / "v"
+        df = dd.read_parquet(path_v, engine="pyarrow")
+        df = df.compute().iloc[:maxmode, :].transpose()
+        for v in variables[1:]:
+            path_v = Path.cwd() / path_results_pod / f"{v}" / "v"
+            df2 = dd.read_parquet(path_v, engine="pyarrow")
+            df2 = df2.compute().iloc[:maxmode, :].transpose()
+            df = pd.concat([df, df2], axis=1)
+
+        for v in variables:
+            path_v = Path.cwd() / path_results_pod2 / f"{v}" / "v"
+            df2 = dd.read_parquet(path_v, engine="pyarrow")
+            df2 = df2.compute().iloc[:maxmode, :].transpose()
+            df = pd.concat([df, df2], axis=1)
+
+        df = df.dropna()
+        len_ = int(len(df.columns) / 2)
+        dfcorr_adjusted = pd.DataFrame(np.nan, columns=range(len_), index=range(len_))
+        dfcorr = pd.DataFrame(np.nan, columns=range(len_), index=range(len_))
+        for i in tqdm(range(len_), "computing correlations"):
+            for j in range(len_):
+                v1 = df.iloc[:, i]
+                v2 = df.iloc[:, len_ + j]
+                corrcoef, corrcoef_adj = self.correlate(v1, v2)
+                dfcorr.iat[i, j] = corrcoef
+                dfcorr_adjusted.iat[i, j] = corrcoef_adj
+
+        diff = dfcorr_adjusted.T - dfcorr_adjusted
+        diff = diff.where(np.triu(np.ones(diff.shape), k=0).astype(np.bool))
+
+        for name, df in zip(
+            ["corr", "corr_adjusted", "diff"], [dfcorr, dfcorr_adjusted, diff]
+        ):
+            fig, ax = plt.subplots()
+            fig.set_size_inches(self.width * 2, self.width * 2)
+            fig.patch.set_facecolor("w")
+
+            ax1 = ax.imshow(df.abs(), interpolation="none", aspect="equal")
+            ax1.set_clim(0, df.max().max())
+            divider = make_axes_locatable(ax)
+            cax = divider.append_axes("right", size="5%", pad="4%")
+            cbar = fig.colorbar(ax1, cax=cax)
+            cbar.ax.set_xlabel("Correlation Coefficient")
+            for i in range(1, len(variables)):
+                ax.axhline(i * maxmode - 0.5, color="w")
+                ax.axvline(i * maxmode - 0.5, color="w")
+
+            varlabels = []
+            for var in variables:
+                label = re.sub(r"\[(.*?)\]", "", var)
+                label = re.sub(r"\.", " ", label)
+                varlabels.append(label)
+
+            majorloc = np.arange(
+                np.floor(maxmode / 2),
+                maxmode * len(variables) + np.floor(maxmode / 2),
+                step=maxmode,
+            )
+            ax.xaxis.set_ticks(majorloc, varlabels)
+            ax.yaxis.set_ticks(
+                majorloc,
+                varlabels,
+                rotation=90,
+                va="center",
+            )
+            ax.xaxis.set_minor_locator(AutoMinorLocator(maxmode))
+            ax.yaxis.set_minor_locator(AutoMinorLocator(maxmode))
+
+            indexskip = int((maxmode + 1) / 5)
+            ax.xaxis.set_minor_formatter(
+                FuncFormatter(
+                    lambda x, pos: f"{x % maxmode:.0f}"
+                    if (x % maxmode) in np.arange(0, maxmode - 1, indexskip)
+                    else ""
+                )
+            )
+            ax.yaxis.set_minor_formatter(
+                FuncFormatter(
+                    lambda x, pos: f"{x % maxmode:.0f}"
+                    if (x % maxmode) in np.arange(0, maxmode - 1, indexskip)
+                    else ""
+                )
+            )
+            ax.xaxis.remove_overlapping_locs = False
+            ax.yaxis.remove_overlapping_locs = False
+            ax.tick_params(axis="both", which="both", length=7)
+            ax.tick_params(axis="both", which="major", pad=20)
+
+            plt.savefig(
+                f"{path_viz}/2X_{name}_{maxmode}" + ".png",
+                dpi=self.dpi,
+                bbox_inches="tight",
+            )
+            plt.close("all")
+
+    def svd_correlation_signals(
+        self,
+        variables,
+        maxmode=5,
+        path_results_pod=".usv",
+        path_signals=".signals",
+        path_viz=".viz",
+    ):
+        """
+        svd_correlation_signals plot correlation heatmap between signals in a folder and
+        the svd mode coefficients. Signals are assumed to be in pickled format.
+
+        Args:
+            variables (list): list of variables to consider in the correlation map
+            maxmode (int, optional): maximum number of modes to consider in the correlation map. Defaults to 5.
+            path_results_pod (str, optional):  path to read SVD results from. Defaults to ".usv".
+            path_signals (str, optional): folder for set of signals. Defaults to ".signals".
+            path_viz (str, optional): _description_. Defaults to ".viz".
+        """
+        import matplotlib.pyplot as plt
+        from matplotlib.ticker import AutoMinorLocator, FuncFormatter
+        from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+        plt.rc("font", family=self.font)
+        plt.rc("font", size=self.fontsize)
+
+        utils.ensure_dir(path_viz)
+
+        variables = variables if type(variables) is list else [variables]
+
+        path_v = Path.cwd() / path_results_pod / f"{variables[0]}" / "v"
+        df = dd.read_parquet(path_v, engine="pyarrow")
+        df = df.compute().iloc[:maxmode, :].transpose()
+        for v in variables[1:]:
+            path_v = Path.cwd() / path_results_pod / f"{v}" / "v"
+            df2 = dd.read_parquet(path_v, engine="pyarrow")
+            df2 = df2.compute().iloc[:maxmode, :].transpose()
+            df = pd.concat([df, df2], axis=1)
+        df = df.dropna()
+
+        pathlist = Path(path_signals).resolve().glob("*")
+        signals = []
+        for path in pathlist:
+            signals.append(pd.Series(utils.loadit(path), name=path.name))
+        signaldf = pd.concat(signals, axis=1)
+        dfcorr_adjusted = pd.DataFrame(
+            np.nan, columns=range(signaldf.shape[1]), index=range(df.shape[1])
+        )
+        dfcorr = pd.DataFrame(
+            np.nan, columns=range(signaldf.shape[1]), index=range(df.shape[1])
+        )
+
+        for i in tqdm(range(df.shape[1]), "computing correlations"):
+            for j in range(signaldf.shape[1]):
+                v1 = df.iloc[:, i]
+                v2 = signaldf.iloc[:, j]
+                corrcoef, corrcoef_adj = self.correlate(v1, v2)
+                dfcorr.iat[i, j] = corrcoef
+                dfcorr_adjusted.iat[i, j] = corrcoef_adj
+
+        for name, df in zip(["corr", "corr_adjusted"], [dfcorr, dfcorr_adjusted]):
+            fig, ax = plt.subplots()
+            fig.set_size_inches(
+                self.width * signaldf.shape[1] / df.shape[1], self.width * 3
+            )
+            fig.patch.set_facecolor("w")
+
+            ax1 = ax.imshow(df.abs(), interpolation="none", aspect="equal")
+            ax1.set_clim(0, 1)
+            divider = make_axes_locatable(ax)
+            cax = divider.append_axes(
+                "right",
+                size=self.width * 5 / 100,
+                pad=self.width * 2 / 100,
+            )
+            cbar = fig.colorbar(ax1, cax=cax)
+            cbar.ax.set_xlabel("Correlation Coefficient")
+
+            for i in range(1, len(variables)):
+                ax.axhline(i * maxmode - 0.5, color="w")
+            for i in range(1, 1 + len(signaldf.columns)):
+                ax.axvline(i - 0.5, color="w")
+
+            varlabels = []
+            for var in variables:
+                label = re.sub(r"\[(.*?)\]", "", var)
+                label = re.sub(r"\.", " ", label)
+                varlabels.append(label)
+
+            majorloc = np.arange(
+                np.floor(maxmode / 2),
+                maxmode * len(variables) + np.floor(maxmode / 2),
+                step=maxmode,
+            )
+            sigloc = np.arange(
+                0,
+                signaldf.shape[1],
+                step=1,
+            )
+            ax.xaxis.set_ticks(
+                sigloc,
+                signaldf.columns,
+                rotation=90,
+                ha="center",
+            )
+            ax.yaxis.set_ticks(
+                majorloc,
+                varlabels,
+                rotation=90,
+                va="center",
+            )
+            ax.yaxis.set_minor_locator(AutoMinorLocator(maxmode))
+
+            indexskip = int((maxmode + 1) / 5)
+            ax.yaxis.set_minor_formatter(
+                FuncFormatter(
+                    lambda x, pos: f"{x % maxmode:.0f}"
+                    if (x % maxmode) in np.arange(0, maxmode - 1, indexskip)
+                    else ""
+                )
+            )
+            ax.xaxis.remove_overlapping_locs = True
+            ax.yaxis.remove_overlapping_locs = False
+            ax.tick_params(axis="y", which="both", length=7)
+            ax.tick_params(axis="y", which="major", pad=20)
+
+            plt.savefig(
+                f"{path_viz}/Sig_{name}_{maxmode}" + ".png",
+                dpi=self.dpi,
+                bbox_inches="tight",
+            )
+            plt.close("all")
+
+    def make_dim(self, coordinates):
+        """
+        make_dim set the analysis dimensions
+
+        Args:
+            coordinates (str): "2d" or "3d"
+        """
+        coordinates = coordinates.lower().strip()
+        if coordinates == "2d":
+            self.dim = "xy"
+        elif coordinates == "3d":
+            self.dim = "xyz"
+        else:
+            raise ("please specify 2D or 3D as coordinates")
+
+    def make_bounds(self, xyz):
+        """
+        make_bounds define analysis bounds
+
+        Args:
+            xyz (list): x, y ,z coordinate of points
+
+        Returns:
+            list: bounds of analysis and spatial resolution
+        """
+        if self.dim == "xy":
+            x = xyz[0]
+            y = xyz[1]
+            xmin = min(x)
+            xmax = max(x)
+            ymin = min(y)
+            ymax = max(y)
+            lmax = max(xmax, ymax)
+            lmin = max(xmin, ymin)
+            res = (lmax - lmin) / 1000
+            return [xmin, xmax, ymin, ymax, 0, 0, res]
+        if self.dim == "xyz":
+            x = xyz[0]
+            y = xyz[1]
+            z = xyz[2]
+            xmin = min(x)
+            xmax = max(x)
+            ymin = min(y)
+            ymax = max(y)
+            zmin = min(z)
+            zmax = max(z)
+            lmax = max(xmax, ymax, zmax)
+            lmin = max(xmin, ymin, zmin)
+            res = (lmax - lmin) / 75
+            return [xmin, xmax, ymin, ymax, zmin, zmax, res]
+
     def svd_viz(
         self,
         variables,
         modelist,
-        bounds,
+        bounds="auto",
+        coordinates="2D",
         path_results_pod=".usv",
         path_viz=".viz",
         freq_max=3000,
-        dist_map=False,
+        dist=False,
     ):
         """
         svd_viz distributed visualization of Singular Value Decomposition results
@@ -285,44 +958,80 @@ class POD:
         Args:
             variables (list or str): list of variables to consider
             modelist (list): modes to consider
-            dt (float): timestep of data acquisition
             bounds (list): domain bounds for visualization [xmin, xmax, ymin, ymax, resolution]
+            coordinates (str): "2D" or "3D" visualization of modes
             path_results_pod (str, optional): path to read SVD results from. Defaults to ".usv".
             path_viz (str, optional): path to store plots in. Defaults to ".viz".
             freq_max (float, optional): maximum frequency of interest for PSD plots. Defaults to 3kHz.
-            dist_map (bool): whether to compute a mask for mode results. Defaults to False.
+            dist (float or bool): distance threshold to mask the xy meshgrid using k-d tree method. Defaults to False.
         """
         variables = variables if type(variables) is list else [variables]
         modelist = modelist if type(modelist) is list else list(modelist)
 
-        path_x = Path.cwd() / path_results_pod / "x.pkl"
-        path_y = Path.cwd() / path_results_pod / "y.pkl"
-        x = utils.loadit(path_x)
-        y = utils.loadit(path_y)
-
-        if dist_map:
-            dist = self.dist_map(x, y, bounds)
-        else:
-            dist = None
-
-        if not os.path.exists(f"{path_viz}"):
-            os.makedirs(f"{path_viz}")
+        self.make_dim(coordinates)
 
         for var in tqdm(variables, "analyzing variables"):
+            utils.ensure_dir(f"{path_viz}/{var}")
 
             path_u = Path.cwd() / path_results_pod / f"{var}" / "u"
             path_v = Path.cwd() / path_results_pod / f"{var}" / "v"
             path_s = Path.cwd() / path_results_pod / f"{var}" / "s.pkl"
-
             u = dd.read_parquet(path_u, engine="pyarrow")
             v = dd.read_parquet(path_v, engine="pyarrow")
             s = utils.loadit(path_s)
 
-            if not os.path.exists(f"{path_viz}/{var}"):
-                os.makedirs(f"{path_viz}/{var}")
+            if self.dim == "xy":
+                path_x = Path.cwd() / path_results_pod / "x.pkl"
+                path_y = Path.cwd() / path_results_pod / "y.pkl"
+                x = utils.loadit(path_x)
+                y = utils.loadit(path_y)
 
-            self.uv_viz(
-                x, y, u, v, f"{path_viz}/{var}", modelist, bounds, freq_max, dist
+                if bounds == "auto":
+                    bounds = self.make_bounds([x, y])
+
+                if dist:
+                    dist_map = self.dist_map(x, y, bounds)
+
+                self.u_viz(
+                    x,
+                    y,
+                    u,
+                    f"{path_viz}/{var}",
+                    modelist,
+                    bounds,
+                    freq_max,
+                    dist,
+                    dist_map,
+                )
+
+            if self.dim == "xyz":
+                path_x = Path.cwd() / path_results_pod / "x.pkl"
+                path_y = Path.cwd() / path_results_pod / "y.pkl"
+                path_z = Path.cwd() / path_results_pod / "z.pkl"
+                x = utils.loadit(path_x)
+                y = utils.loadit(path_y)
+                z = utils.loadit(path_z)
+
+                if bounds == "auto":
+                    bounds = self.make_bounds([x, y, z])
+
+                self.u_viz_3d(
+                    x,
+                    y,
+                    z,
+                    u,
+                    f"{path_viz}/{var}",
+                    modelist,
+                    bounds,
+                    freq_max,
+                    dist=0,
+                    dist_map=0,
+                )
+            self.v_viz(
+                v,
+                f"{path_viz}/{var}",
+                modelist,
+                freq_max,
             )
             self.s_viz(s, f"{path_viz}/{var}")
 
@@ -334,7 +1043,7 @@ class POD:
         path_viz=".viz",
     ):
         """
-        s_viz_combined visualization of all s energy values in one plot
+        s_viz_combined visualization of all s energy values in one plot shown as cumulative contibutions
 
         Args:
             variables (list or str): list of variables to consider
@@ -345,8 +1054,7 @@ class POD:
 
         variables = variables if type(variables) is list else [variables]
 
-        if not os.path.exists(f"{path_viz}"):
-            os.makedirs(f"{path_viz}")
+        utils.ensure_dir(path_viz)
 
         s_combined = pd.DataFrame(columns=variables)
         for var in variables:
@@ -354,8 +1062,6 @@ class POD:
             path_s = Path.cwd() / path_results_pod / f"{var}" / "s.pkl"
             s = utils.loadit(path_s)
 
-            if not os.path.exists(f"{path_viz}/"):
-                os.makedirs(f"{path_viz}/")
             mode_energy = [x**2 for x in s]
             mode_energy = mode_energy / sum(mode_energy) * 100
             cumsum = np.cumsum(mode_energy)
@@ -384,7 +1090,8 @@ class POD:
         font="Times New Roman",
         fontsize=14,
         height=4,
-        width=6,
+        width=5,
+        contour_levels=20,
     ):
         """
         set_viz_params set visualization parameters
@@ -409,6 +1116,7 @@ class POD:
         self.fontsize = fontsize
         self.width = width
         self.height = height
+        self.contour_levels = contour_levels
 
     def dist_map(self, x, y, bounds):
         """
@@ -443,52 +1151,224 @@ class POD:
         Returns:
             ndarray: numpy meshgrid
         """
-        xmin, xmax, ymin, ymax, res = bounds
-        mgrid = np.meshgrid(
-            np.arange(
-                xmin,
-                xmax + res,
-                res,
-            ),
-            np.arange(
-                ymin,
-                ymax + res,
-                res,
-            ),
-        )
-        return mgrid
+        if self.dim == "xy":
+            xmin, xmax, ymin, ymax, res = bounds
+            mgrid = np.meshgrid(
+                np.arange(
+                    xmin,
+                    xmax + res,
+                    res,
+                ),
+                np.arange(
+                    ymin,
+                    ymax + res,
+                    res,
+                ),
+            )
+            return mgrid
 
-    def uv_viz(self, x, y, u, v, path_viz, modelist, bounds, freq_max, dist):
+        if self.dim == "xyz":
+            xmin, xmax, ymin, ymax, zmin, zmax, res = bounds
+            mgrid = np.meshgrid(
+                np.arange(
+                    xmin,
+                    xmax + res,
+                    res,
+                ),
+                np.arange(
+                    ymin,
+                    ymax + res,
+                    res,
+                ),
+                np.arange(
+                    zmin,
+                    zmax + res,
+                    res,
+                ),
+            )
+            return mgrid
+
+    def u_viz_3d(
+        self,
+        x,
+        y,
+        z,
+        u,
+        path_viz,
+        modelist,
+        bounds,
+    ):
         """
-        uv_viz visualize u and v matrix of SVD result. used in svd.viz.
+        u_viz_3d 3D visualization of SVD mode shapes
 
         Args:
-            x (series): x coordinate
-            y (series): y coordinate
-            u (dataframe): u matrix from SVD analysis
-            v (dataframe): v matrix from SVD analysis
-            path_viz (str): path to save results
-            modelist (list): list of modes to visualize
-            bounds (list): domain bounds for visualization [xmin,xmax,ymin,ymax,resolution]
-            freq_max (int): maximum frequency to consider is PSD graphs
-            dist (array): kd-tree distance map for the domain
+            x (list): x coordinates
+            y (list): y coordinates
+            z (list): z coordinates
+            u (list): u matrix from SVD analysis
+            path_viz (str): path to store plots in
+            modelist (list): mode numbers to visualize
+            bounds (list): visualization boundaries and resolution
         """
         from scipy.interpolate import griddata
-        from scipy.signal import find_peaks
+        import plotly.graph_objects as go
+        import plotly.io as pio
+        from ipywidgets import (
+            interact,
+            FloatSlider,
+            FloatRangeSlider,
+            Layout,
+            Button,
+        )
+        from IPython.display import display
+        from IPython.core.interactiveshell import InteractiveShell
 
+        InteractiveShell.ast_node_interactivity = "all"
+
+        pio.templates["custom"] = go.layout.Template(
+            layout=go.Layout(
+                font_family=self.font,
+                font_size=self.fontsize,
+            )
+        )
+        pio.templates.default = "simple_white+custom"
+
+        xmin, xmax, ymin, ymax, zmin, zmax, res = bounds
+        xx, yy, zz = self.make_meshgrid(bounds)
+
+        figs = [[] for x in range(max(modelist) + 1)]
+
+        for mode in tqdm(modelist, "creating plots", leave=False):
+            uu = u.iloc[:, mode].compute()
+            kk = griddata(
+                (x, z, y),
+                uu,
+                (xx, zz, yy),
+                method="linear",
+                fill_value=min(abs(uu)),
+            )
+            kmin = kk.min()
+            kmax = kk.max()
+            krng = kmax - kmin
+            kmean = kk.mean()
+            stp = krng / 100
+            kwargs = dict(layout=Layout(width="700px"), readout_format=".4f")
+            fig = go.FigureWidget(
+                data=go.Isosurface(
+                    x=xx.flatten(),
+                    z=yy.flatten(),
+                    y=zz.flatten(),
+                    value=kk.flatten(),
+                    isomin=kk.min(),
+                    isomax=kk.max(),
+                    surface_count=2,
+                    opacity=1,
+                    colorscale="bluered",
+                    caps=dict(x_show=False, y_show=False, z_show=False),
+                    showscale=False,
+                    flatshading=False,
+                    lighting=dict(ambient=0.65, specular=0.8),
+                )
+            )
+
+            fig.update_layout(
+                width=600,
+                height=400 * (ymax - ymin) / (xmax - xmin),
+                scene=dict(
+                    xaxis=dict(
+                        gridcolor="lightgray",
+                        showticklabels=False,
+                        title="",
+                        showgrid=True,
+                        range=[xmin, xmax],
+                    ),
+                    yaxis=dict(
+                        gridcolor="lightgray",
+                        showticklabels=False,
+                        title="",
+                        showgrid=True,
+                        range=[zmin, zmax],
+                    ),
+                    zaxis=dict(
+                        gridcolor="lightgray",
+                        showticklabels=False,
+                        title="",
+                        showgrid=True,
+                        range=[ymin, ymax],
+                    ),
+                    aspectmode="data",
+                    camera=dict(eye=dict(x=1.35, y=1.35, z=1.35)),
+                ),
+                margin=go.layout.Margin(l=0, r=0, b=0, t=0, pad=0),
+            )
+            figs[mode] = fig
+            print(f"fig_id = {mode}")
+
+            @interact(
+                fig_id=modelist,
+                surface_count=(1, 20, 1),
+                opacity=FloatSlider(value=0.5, min=0, max=1, step=0.01, **kwargs),
+                iso=FloatSlider(value=kmean, min=kmin, max=kmax, step=stp, **kwargs),
+                iso_spread=FloatSlider(value=5, min=0, max=100, step=0.05, **kwargs),
+                iso_limits=FloatRangeSlider(
+                    value=(kmin, kmax), min=kmin, max=kmax, step=stp, **kwargs
+                ),
+            )
+            def update(
+                opacity=0.5,
+                surface_count=2,
+                iso=kmean,
+                iso_spread=5,
+                fig_id=mode,
+                iso_limits=(kmin, kmax),
+            ):
+                with fig.batch_update():
+                    figs[fig_id].data[0].surface.count = surface_count
+                    figs[fig_id].data[0].opacity = opacity
+                    l_bound = max(iso_limits[0], iso - krng * iso_spread / 100)
+                    h_bound = min(iso_limits[1], iso + krng * iso_spread / 100)
+                    figs[fig_id].data[0].isomin = l_bound
+                    figs[fig_id].data[0].isomax = h_bound
+                    figs[fig_id].data[0].cmin = l_bound
+                    figs[fig_id].data[0].cmax = h_bound
+
+            def buttonfunction(btn):
+                figs[int(btn.description[5:])].write_image(
+                    f"{path_viz}/u{btn.description[5:]}_3D" + ".png", scale=4
+                )
+
+            savebutton = Button(description=f"save {mode}", button_style="primary")
+            savebutton.on_click(buttonfunction)
+
+            display(savebutton, fig)
+
+    def u_viz(self, x, y, u, path_viz, modelist, bounds, dist, dist_map):
+        """
+        u_viz 2D visualization of SVD mode shapes
+
+        Args:
+            x (series): x coordinates
+            y (series): y coordinates
+            z (series): z coordinates
+            u (dataframe): u matrix from SVD analysis
+            path_viz (str): path to store plots in
+            modelist (list): mode numbers to visualize
+            bounds (list): visualization boundaries and resolution
+            dist (float): distance threshold to mask out mode shapes
+            dist_map (ndarray): k-d tree distance map for coordinates
+        """
+        from scipy.interpolate import griddata
         import matplotlib.pyplot as plt
-        import matplotlib.mlab as mlab
 
-        plt.rc("font", family="Times New Roman")
-        plt.rc("font", size=14)
+        plt.rc("font", family=self.font)
+        plt.rc("font", size=self.fontsize)
 
-        # define 2D bounds and resolution
         xmin, xmax, ymin, ymax, res = bounds
         xx, yy = self.make_meshgrid(bounds)
 
-        for mode in tqdm(modelist, "creating POD plots", leave=False):
+        for mode in tqdm(modelist, "plotting 2D mode shapes", leave=False):
             uu = u.iloc[:, mode].compute()
-            zz = griddata(
+            kk = griddata(
                 (x, y),
                 uu,
                 (xx, yy),
@@ -499,7 +1379,7 @@ class POD:
                 # adjust this threshold according to your mesh size
                 # this will mask out the parts of visualization for
                 # which the distance between points exceeds a certain value
-                zz[dist >= res * 13] = np.nan
+                kk[dist_map >= dist] = np.nan
 
             fig, ax = plt.subplots(1)
             fig.set_size_inches(self.width, self.height)
@@ -513,64 +1393,110 @@ class POD:
             ax.set_aspect(1)
             ax.set_axisbelow(True)
             ax.grid(alpha=0.5)
-            zz[np.isnan(zz)] = np.min(abs(zz))
+            kk[np.isnan(kk)] = np.min(abs(kk))
 
-            ax.contourf(xx, yy, zz, 50, cmap=self.cmap, antialiased=True, extend="both")
+            contour = ax.contourf(
+                xx,
+                yy,
+                kk,
+                self.contour_levels,
+                cmap=self.cmap,
+                antialiased=True,
+                extend="both",
+            )
+            for c in contour.collections:
+                c.set_edgecolor("face")
             fig.tight_layout()
             for axis in ["top", "bottom", "left", "right"]:
                 ax.spines[axis].set_linewidth(self.ax_width)
             plt.savefig(
                 f"{path_viz}/u{mode}" + ".png", dpi=self.dpi, bbox_inches="tight"
             )
+            plt.close("all")
 
+    def v_viz(self, v, path_viz, modelist, freq_max):
+        """
+        uv_viz visualize u and v matrix of SVD result. used in svd.viz.
+
+        Args:
+            x (series): x coordinates
+            y (series): y coordinates
+            u (dataframe): u matrix from SVD analysis
+            v (dataframe): v matrix from SVD analysis
+            path_viz (str): path to save results
+            modelist (list): list of modes to visualize
+            freq_max (int): maximum frequency to consider is PSD graphs
+        """
+        from scipy.signal import find_peaks
+
+        import matplotlib.pyplot as plt
+        import matplotlib.mlab as mlab
+
+        plt.rc("font", family=self.font)
+        plt.rc("font", size=self.fontsize)
+        for mode in tqdm(modelist, "plotting mode coefficients", leave=False):
             vv = v.compute().iloc[mode, :]
             tt = np.arange(self.t0, vv.shape[0] * self.dt, self.dt)
 
-            fig, ax = plt.subplots(2, 1)
-            fig.set_size_inches(self.width, self.height * 2)
+            fig, ax = plt.subplots(1)
+            fig.set_size_inches(self.width, self.height)
             fig.patch.set_facecolor("w")
-            ax[0].set_xlabel("Time [s]")
-            ax[0].set_ylabel("Coefficient")
-            ax[0].grid(alpha=0.5)
-            ax[0].set_xlim(tt[0], tt[-1])
-            ax[0].plot(tt, vv, self.color, linewidth=self.linewidth)
+            ax.set_xlabel("Time [s]")
+            ax.set_ylabel("Coefficient")
+            ax.grid(alpha=0.5)
+            ax.set_xlim(tt[0], tt[-1])
+            ax.plot(tt, vv, self.color, linewidth=self.linewidth)
 
-            ax[1].set_xlabel("Frequency [Hz]")
-            ax[1].set_ylabel("Power Spectral Density [db/Hz]")
-            ax[1].grid(alpha=0.5)
-            ax[1].set_xlim(0, freq_max)
+            fig.tight_layout()
+            for axis in ["bottom", "left"]:
+                ax.spines[axis].set_linewidth(self.ax_width)
+            for axis in ["top", "right"]:
+                ax.spines[axis].set_linewidth(0)
+            plt.savefig(
+                f"{path_viz}/v{mode}" + ".png", dpi=self.dpi, bbox_inches="tight"
+            )
+
+            fig, ax = plt.subplots(1)
+            fig.set_size_inches(self.width, self.height)
+            fig.patch.set_facecolor("w")
+            ax.set_xlabel("Frequency [Hz]")
+            ax.set_ylabel("Power Spectral Density [db/Hz]")
+            ax.grid(alpha=0.5)
+            ax.set_xlim(0, freq_max)
 
             Pxx, freqs = mlab.psd(
-                vv, Fs=1 / self.dt, window=mlab.window_hanning, detrend="linear"
+                vv,
+                Fs=1 / self.dt,
+                window=mlab.window_hanning,
+                detrend="linear",
             )
             freqs = freqs[np.where(freqs < freq_max)]
             Pxx = Pxx[: len(freqs)]
             dbPxx = 10 * np.log10(Pxx)
             peaks, _ = find_peaks(dbPxx, prominence=3)
-            ax[1].plot(freqs, dbPxx, self.color, linewidth=self.linewidth)
+            ax.plot(freqs, dbPxx, self.color, linewidth=self.linewidth)
             npeaks = 3
             for n in range(0, min(npeaks, len(peaks))):
-                ax[1].scatter(
+                ax.scatter(
                     freqs[peaks[n]],
                     dbPxx[peaks[n]],
                     s=80,
                     facecolors="none",
                     edgecolors="grey",
                 )
-                ax[1].annotate(
+                ax.annotate(
                     f"{freqs[peaks[n]]:0.0f}",
                     xy=(freqs[peaks[n]] + freq_max / 25, dbPxx[peaks[n]] * 0.99),
                 )
             fig.tight_layout()
-            for i in range(2):
-                for axis in ["bottom", "left"]:
-                    ax[i].spines[axis].set_linewidth(self.ax_width)
-                for axis in ["top", "right"]:
-                    ax[i].spines[axis].set_linewidth(0)
+            for axis in ["bottom", "left"]:
+                ax.spines[axis].set_linewidth(self.ax_width)
+            for axis in ["top", "right"]:
+                ax.spines[axis].set_linewidth(0)
             plt.savefig(
-                f"{path_viz}/v{mode}" + ".png", dpi=self.dpi, bbox_inches="tight"
+                f"{path_viz}/v{mode}_PSD" + ".png", dpi=self.dpi, bbox_inches="tight"
             )
-            plt.close('all')
+            plt.close("all")
 
     def s_viz(self, s, path_viz, maxmode=100):
         """
@@ -609,7 +1535,7 @@ class POD:
         for axis in ["top", "right"]:
             ax.spines[axis].set_linewidth(0)
         plt.savefig(f"{path_viz}/s" + ".png", dpi=self.dpi, bbox_inches="tight")
-        plt.close('all')
+        plt.close("all")
 
     def s_viz_combined_plot(self, s, path_viz):
         """
@@ -622,8 +1548,8 @@ class POD:
         import matplotlib.pyplot as plt
         import matplotlib.ticker as mtick
 
-        plt.rc("font", family="Times New Roman")
-        plt.rc("font", size=14)
+        plt.rc("font", family=self.font)
+        plt.rc("font", size=self.fontsize)
 
         clrs_list = ["k", "b", "g", "r"]
         styl_list = ["-", "--", "-.", ":"]
@@ -646,7 +1572,7 @@ class POD:
             styl = styl_list[i % 4]
             ax.plot(s[var], linewidth=self.linewidth, label=label, color=clrr, ls=styl)
 
-        ax.legend()
+        ax.legend(fontsize="small")
         fig.tight_layout()
         for axis in ["bottom", "left"]:
             ax.spines[axis].set_linewidth(self.ax_width)
@@ -655,4 +1581,4 @@ class POD:
         plt.savefig(
             f"{path_viz}/s_combined" + ".png", dpi=self.dpi, bbox_inches="tight"
         )
-        plt.close('all')
+        plt.close("all")
