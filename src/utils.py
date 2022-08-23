@@ -71,6 +71,13 @@ class utils:
         with open(name, "rb") as f:
             return pickle.load(f)
 
+    @staticmethod
+    def ensure_dir(path):
+        import os
+
+        if not os.path.exists(f"{path}"):
+            os.makedirs(f"{path}")
+
     @contextmanager
     def timeit(description="task duration") -> None:
         start = time.time()
