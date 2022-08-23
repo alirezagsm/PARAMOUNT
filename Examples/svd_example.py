@@ -4,7 +4,7 @@ from src.PARAMOUNT import POD
 def main():
     """
 
-    Read csv datasets and perform Proper Orthogonal Decomposition.
+    Read parquet database of desired variables, perform Proper Orthogonal Decomposition and store results in parquet format.
 
     Parameters Used
     ----------
@@ -17,9 +17,10 @@ def main():
     """
     path_parquet = ".data"
     path_results_pod = ".usv"
-    varlist = POD.get_folderlist(path_parquet, boolPrint=True)
-    variables = varlist
-    pod = POD()
+    variables = POD.get_folderlist(path_parquet, boolPrint=True)
+
+    pod = POD(show_dashboard=True)
+
     pod.svd_save_usv(
         variables,
         path_parquet=path_parquet,
