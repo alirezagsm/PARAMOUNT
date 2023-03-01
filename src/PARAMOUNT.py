@@ -149,12 +149,12 @@ class POD:
         Args:
             variables (list): list of variables to consider
             coordiantes (str): catresian coordinates to store e.g. 2D for 'xy' and 3D for 'xyz'.
-            path_csv (_type_, optional): _description_. Defaults to Path.cwd().
-            path_parquet (str, optional): _description_. Defaults to ".data".
-            i_start (int, optional): _description_. Defaults to 0.
-            i_end (_type_, optional): _description_. Defaults to None.
-            delimiter (str, optional): _description_. Defaults to ",".
-            skiprows (int, optional): _description_. Defaults to 0.
+            path_csv (_type_, optional): Path to folder contining CSV files. Defaults to Path.cwd().
+            path_parquet (str, optional): Path to save parquet database in. Defaults to ".data".
+            i_start (int, optional): index for first CSV file. Defaults to 0.
+            i_end (_type_, optional): index for last CSV file. Defaults to None which means consider all files.
+            delimiter (str, optional): delimiter in CSV file. Defaults to ",".
+            skiprows (int, optional): number of rows to skip. Defaults to 0.
 
         Raises:
             ValueError: checking for existing folders and warn user about unwanted overwrites
@@ -230,9 +230,9 @@ class POD:
         delimiter=",",
         x0=0,
         y0=0,
-        z0=0,
         tol=1e-3,
         skiprows=0,
+        booldisplay=False,
     ):
         """
         extract_csv_sequential extract data from a point in sequential manner
@@ -248,7 +248,6 @@ class POD:
             skiprows (int, optional): rows to skip in csv files. Defaults to 0.
         """
         pathlist = sorted(Path(path_csv).resolve().glob("*.csv"))
-
         df = pd.read_csv(pathlist[0], sep=delimiter, skiprows=skiprows)
 
         x = df.iloc[:, 0]
@@ -260,6 +259,16 @@ class POD:
             if abs(x[i] - x0) < tol and abs(y[i] - y0) < tol:
                 index = i
                 break
+
+        if booldisplay:
+            import matplotlib.pyplot as plt
+            from IPython.display import display
+
+            fig, ax = plt.subplots()
+            fig.set_size_inches(6, 15)
+            ax.scatter(x, y, color="k")
+            ax.scatter(x[index], y[index], color="r")
+            display(fig)
 
         variables = df.columns[3:]
 
@@ -314,6 +323,54 @@ class POD:
             utils.saveit(results[i], f"{path_save}/{var.strip()}")
 
     @staticmethod
+    def fft_signal(signal, dt, path_save=Path.cwd(), fmax=3000):
+        """
+        fft_signal produce fast fourier transform plot of a given signal
+
+        Args:
+            signal (Series): raw data
+            dt (float): acquisition time period
+            path_save (str, optional): path to save fft plot. Defaults to Path.cwd().
+            fmax (int): maximum frequency to include in plot
+        """
+        import numpy as np
+        from scipy.fft import fft, fftfreq
+        import matplotlib.pyplot as plt
+
+        plt.rc("font", family="Times New Roman")
+        plt.rc("font", size=14)
+
+        N = len(signal)
+        T = dt
+
+        yf = fft(signal)
+        xf = fftfreq(N, T)[: N // 2]
+
+        yff = 2.0 / N * np.abs(yf[1 : N // 2])
+        xff = xf[1 : N // 2]
+
+        fig, ax = plt.subplots()
+        fig.set_size_inches(5, 4)
+        fig.patch.set_facecolor("w")
+        ax.plot(xff, yff, "k", linewidth=0.75)
+        ax.set_xlim(0, fmax)
+        ax.set_ylim(0, max(yff) * 1.05)
+        ax.set_xlabel("Frequency [Hz]")
+        ax.set_ylabel("FFT magnitude")
+
+        ax.set_axisbelow(True)
+        ax.grid(alpha=0.5, which="both")
+
+        fig.tight_layout()
+        for axis in ["bottom", "left"]:
+            ax.spines[axis].set_linewidth(0.5)
+        for axis in ["top", "right"]:
+            ax.spines[axis].set_linewidth(0)
+        plt.savefig(f"{path_save}/fft" + ".png", dpi=300, bbox_inches="tight")
+        plt.close("all")
+        plt.show()
+
+    @staticmethod
     def check_parquet(path_parquet=".data"):
         """
         check_parquet read and print head of all parquet files in path
@@ -328,7 +385,8 @@ class POD:
             print(df.head())
             print(len(df))
 
-    def correlate(self, v1, v2):
+    @staticmethod
+    def correlate(v1, v2):
         """
         correlate find pearson's correlation as well as maximum correlation found for a time lag between signals
 
@@ -401,6 +459,8 @@ class POD:
             u, s, v = da.linalg.svd(df.values)
 
             for name, item in zip(["u", "v"], [u, v]):
+                if np.isnan(item.shape[0]):
+                    item = item.compute()
                 result = dd.from_array(item)
                 result.columns = result.columns.astype(str)
                 dd.to_parquet(
@@ -774,7 +834,7 @@ class POD:
             maxmode (int, optional): maximum number of modes to consider in the correlation map. Defaults to 5.
             path_results_pod (str, optional):  path to read SVD results from. Defaults to ".usv".
             path_signals (str, optional): folder for set of signals. Defaults to ".signals".
-            path_viz (str, optional): _description_. Defaults to ".viz".
+            path_viz (str, optional): path to save results in. Defaults to ".viz".
         """
         import matplotlib.pyplot as plt
         from matplotlib.ticker import AutoMinorLocator, FuncFormatter
@@ -999,7 +1059,6 @@ class POD:
                     f"{path_viz}/{var}",
                     modelist,
                     bounds,
-                    freq_max,
                     dist,
                     dist_map,
                 )
@@ -1023,9 +1082,6 @@ class POD:
                     f"{path_viz}/{var}",
                     modelist,
                     bounds,
-                    freq_max,
-                    dist=0,
-                    dist_map=0,
                 )
             self.v_viz(
                 v,
@@ -1473,7 +1529,7 @@ class POD:
             freqs = freqs[np.where(freqs < freq_max)]
             Pxx = Pxx[: len(freqs)]
             dbPxx = 10 * np.log10(Pxx)
-            peaks, _ = find_peaks(dbPxx, prominence=3)
+            peaks, _ = find_peaks(dbPxx, prominence=10)
             ax.plot(freqs, dbPxx, self.color, linewidth=self.linewidth)
             npeaks = 3
             for n in range(0, min(npeaks, len(peaks))):
@@ -1484,8 +1540,9 @@ class POD:
                     facecolors="none",
                     edgecolors="grey",
                 )
+                acc = int(np.floor(abs(np.log(freq_max))))
                 ax.annotate(
-                    f"{freqs[peaks[n]]:0.0f}",
+                    f"{freqs[peaks[n]]:0.{acc}f}",
                     xy=(freqs[peaks[n]] + freq_max / 25, dbPxx[peaks[n]] * 0.99),
                 )
             fig.tight_layout()
