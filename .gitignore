@@ -1,6 +1,9 @@
 # Exclude .folders and .files
 .*
+
+# Exclusions
 !.gitignore
+!.vscode
 !.env
 
 # Exclude dask worker space
@@ -128,7 +131,6 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-.env
 .venv
 env/
 venv/
