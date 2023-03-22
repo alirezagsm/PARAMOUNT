@@ -2,6 +2,7 @@
 .*
 !.gitignore
 !.env
+xdmd
 
 # Exclude dask worker space
 dask-worker-space/

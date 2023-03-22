@@ -12,51 +12,18 @@ from src.utils import utils
 from tqdm import tqdm
 
 # suppress dask user warnings
-logging.getLogger("distributed.utils_perf").setLevel(logging.CRITICAL)
-logging.getLogger("distributed.diskutils").setLevel(logging.CRITICAL)
-logging.getLogger("distributed.worker_memory").setLevel(logging.CRITICAL)
+logging.getLogger("distributed").setLevel(logging.CRITICAL)
+# logging.getLogger("distributed.utils_perf").setLevel(logging.CRITICAL)
+# logging.getLogger("distributed.diskutils").setLevel(logging.CRITICAL)
+# logging.getLogger("distributed.worker_memory").setLevel(logging.CRITICAL)
 
 # help pd output better fit in console
 pd.set_option("display.max_colwidth", 20)
 
 
-class POD:
-    """
-
-    handle loading and processing csv datasets for POD analysis
-    this class can read csv files in bulk and save to fast parquet format
-    SVD analysis result are stored in parquet format for fast processing
-    pd.Series are serialized and stored in pickle format
-    Refer to svd_example.py, csv_example.py and viz_example.py for examples on how to utilize UTPOD
-
-    Available Functions
-    ----------
-    read_csv_coordinates
-    csv_to_parquet
-    extract_csv_sequential
-    read_csv_sequential
-    check_parquet
-    correlate
-    svd_save_usv
-    svd_correlation
-    correlation_signals
-    svd_correlation_2X
-    svd_correlation_signals
-    read_csv_columns
-    svd_viz
-    s_viz_combined
-
-    """
-
-    def __init__(self, show_dashboard=False) -> None:
-        """
-        initializes a PARAMOUNT POD class
-        Args:
-            show_dashboard (bool, optional): Whether to open dask dashboard in browser. Defaults to False.
-        """
-
+class Base:
+    def __init__(self, show_dashboard) -> None:
         self.cluster, self.client = self.create_cluster(show_dashboard)
-        self.set_viz_params()
 
     def create_cluster(self, show_dashboard):
         """
@@ -149,12 +116,12 @@ class POD:
         Args:
             variables (list): list of variables to consider
             coordiantes (str): catresian coordinates to store e.g. 2D for 'xy' and 3D for 'xyz'.
-            path_csv (_type_, optional): _description_. Defaults to Path.cwd().
-            path_parquet (str, optional): _description_. Defaults to ".data".
-            i_start (int, optional): _description_. Defaults to 0.
-            i_end (_type_, optional): _description_. Defaults to None.
-            delimiter (str, optional): _description_. Defaults to ",".
-            skiprows (int, optional): _description_. Defaults to 0.
+            path_csv (_type_, optional): Path to folder contining CSV files. Defaults to Path.cwd().
+            path_parquet (str, optional): Path to save parquet database in. Defaults to ".data".
+            i_start (int, optional): index for first CSV file. Defaults to 0.
+            i_end (_type_, optional): index for last CSV file. Defaults to None which means consider all files.
+            delimiter (str, optional): delimiter in CSV file. Defaults to ",".
+            skiprows (int, optional): number of rows to skip. Defaults to 0.
 
         Raises:
             ValueError: checking for existing folders and warn user about unwanted overwrites
@@ -230,9 +197,9 @@ class POD:
         delimiter=",",
         x0=0,
         y0=0,
-        z0=0,
         tol=1e-3,
         skiprows=0,
+        booldisplay=False,
     ):
         """
         extract_csv_sequential extract data from a point in sequential manner
@@ -248,7 +215,6 @@ class POD:
             skiprows (int, optional): rows to skip in csv files. Defaults to 0.
         """
         pathlist = sorted(Path(path_csv).resolve().glob("*.csv"))
-
         df = pd.read_csv(pathlist[0], sep=delimiter, skiprows=skiprows)
 
         x = df.iloc[:, 0]
@@ -260,6 +226,16 @@ class POD:
             if abs(x[i] - x0) < tol and abs(y[i] - y0) < tol:
                 index = i
                 break
+
+        if booldisplay:
+            import matplotlib.pyplot as plt
+            from IPython.display import display
+
+            fig, ax = plt.subplots()
+            fig.set_size_inches(6, 15)
+            ax.scatter(x, y, color="k")
+            ax.scatter(x[index], y[index], color="r")
+            display(fig)
 
         variables = df.columns[3:]
 
@@ -314,6 +290,54 @@ class POD:
             utils.saveit(results[i], f"{path_save}/{var.strip()}")
 
     @staticmethod
+    def fft_signal(signal, dt, path_save=Path.cwd(), fmax=3000):
+        """
+        fft_signal produce fast fourier transform plot of a given signal
+
+        Args:
+            signal (Series): raw data
+            dt (float): acquisition time period
+            path_save (str, optional): path to save fft plot. Defaults to Path.cwd().
+            fmax (int): maximum frequency to include in plot
+        """
+        import numpy as np
+        from scipy.fft import fft, fftfreq
+        import matplotlib.pyplot as plt
+
+        plt.rc("font", family="Times New Roman")
+        plt.rc("font", size=14)
+
+        N = len(signal)
+        T = dt
+
+        yf = fft(signal)
+        xf = fftfreq(N, T)[: N // 2]
+
+        yff = 2.0 / N * np.abs(yf[1 : N // 2])
+        xff = xf[1 : N // 2]
+
+        fig, ax = plt.subplots()
+        fig.set_size_inches(5, 4)
+        fig.patch.set_facecolor("w")
+        ax.plot(xff, yff, "k", linewidth=0.75)
+        ax.set_xlim(0, fmax)
+        ax.set_ylim(0, max(yff) * 1.05)
+        ax.set_xlabel("Frequency [Hz]")
+        ax.set_ylabel("FFT magnitude")
+
+        ax.set_axisbelow(True)
+        ax.grid(alpha=0.5, which="both")
+
+        fig.tight_layout()
+        for axis in ["bottom", "left"]:
+            ax.spines[axis].set_linewidth(0.5)
+        for axis in ["top", "right"]:
+            ax.spines[axis].set_linewidth(0)
+        plt.savefig(f"{path_save}/fft" + ".png", dpi=300, bbox_inches="tight")
+        plt.close("all")
+        plt.show()
+
+    @staticmethod
     def check_parquet(path_parquet=".data"):
         """
         check_parquet read and print head of all parquet files in path
@@ -328,7 +352,8 @@ class POD:
             print(df.head())
             print(len(df))
 
-    def correlate(self, v1, v2):
+    @staticmethod
+    def correlate(v1, v2):
         """
         correlate find pearson's correlation as well as maximum correlation found for a time lag between signals
 
@@ -357,6 +382,316 @@ class POD:
         corrcoef = corr[int(len(corr) / 2)]
         corrcoef_adj = corr[lagindex]
         return corrcoef, corrcoef_adj
+
+    def correlation_signals(
+        self,
+        path_signals=".signals",
+        path_signals2=".signals2",
+        path_viz=".viz",
+    ):
+        """
+        correlation_signals plot correlation heatmap between signals.
+        The signals are assumed to be in pickled format in two folders
+
+        Args:
+            path_signals (str, optional): folder for first set of signals. Defaults to ".usv".
+            path_signals2 (str, optional): folder for second set of signals. Defaults to ".usv2".
+            path_viz (str, optional): path to store plots in. Defaults to ".viz".
+        """
+        import matplotlib.pyplot as plt
+        from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+        utils.ensure_dir(path_viz)
+
+        pathlist = Path(path_signals).resolve().glob("*")
+        pathlist2 = Path(path_signals2).resolve().glob("*")
+
+        signals = []
+        for path in pathlist:
+            signals.append(pd.Series(utils.loadit(path), name=path.name))
+        signaldf = pd.concat(signals, axis=1)
+
+        signals = []
+        for path in pathlist2:
+            signals.append(pd.Series(utils.loadit(path), name=path.name))
+        signaldf2 = pd.concat(signals, axis=1)
+
+        dfcorr_adjusted = pd.DataFrame(
+            np.nan, columns=range(signaldf.shape[1]), index=range(signaldf2.shape[1])
+        )
+        dfcorr = pd.DataFrame(
+            np.nan, columns=range(signaldf.shape[1]), index=range(signaldf2.shape[1])
+        )
+
+        for i in tqdm(range(signaldf.shape[1]), "computing correlations"):
+            for j in range(signaldf2.shape[1]):
+                v1 = signaldf.iloc[:, i]
+                v2 = signaldf2.iloc[:, j]
+                corrcoef, corrcoef_adj = self.correlate(v1, v2)
+                dfcorr.iat[i, j] = corrcoef
+                dfcorr_adjusted.iat[i, j] = corrcoef_adj
+
+        for name, df in zip(["corr", "corr_adjusted"], [dfcorr, dfcorr_adjusted]):
+            fig, ax = plt.subplots()
+            fig.set_size_inches(
+                self.width * signaldf.shape[1] / signaldf2.shape[1], self.width
+            )
+            fig.patch.set_facecolor("w")
+
+            ax1 = ax.imshow(df.abs(), interpolation="none", aspect="equal")
+            ax1.set_clim(0, 1)
+            divider = make_axes_locatable(ax)
+            cax = divider.append_axes(
+                "right",
+                size=self.width * 5 / 100,
+                pad=self.width * 2 / 100,
+            )
+            cbar = fig.colorbar(ax1, cax=cax)
+            cbar.ax.set_xlabel("Correlation Coefficient")
+
+            for i in range(1, 1 + signaldf.shape[1]):
+                ax.axhline(i - 0.5, color="w")
+            for i in range(1, 1 + signaldf2.shape[1]):
+                ax.axvline(i - 0.5, color="w")
+
+            sigloc = np.arange(
+                0,
+                signaldf.shape[1],
+                step=1,
+            )
+            sigloc2 = np.arange(
+                0,
+                signaldf2.shape[1],
+                step=1,
+            )
+            ax.xaxis.set_ticks(
+                sigloc,
+                signaldf.columns,
+                rotation=90,
+                ha="center",
+            )
+            ax.yaxis.set_ticks(
+                sigloc2,
+                signaldf2.columns,
+            )
+
+            ax.xaxis.remove_overlapping_locs = True
+            ax.yaxis.remove_overlapping_locs = False
+
+            plt.savefig(
+                f"{path_viz}/Sigs_{name}" + ".png",
+                dpi=self.dpi,
+                bbox_inches="tight",
+            )
+            plt.close("all")
+
+    def make_dim(self, coordinates):
+        """
+        make_dim set the analysis dimensions
+
+        Args:
+            coordinates (str): "2d" or "3d"
+        """
+        coordinates = coordinates.lower().strip()
+        if coordinates == "2d":
+            self.dim = "xy"
+        elif coordinates == "3d":
+            self.dim = "xyz"
+        else:
+            raise ("please specify 2D or 3D as coordinates")
+
+    def make_bounds(self, xyz):
+        """
+        make_bounds define analysis bounds
+
+        Args:
+            xyz (list): x, y ,z coordinate of points
+
+        Returns:
+            list: bounds of analysis and spatial resolution
+        """
+        if self.dim == "xy":
+            x = xyz[0]
+            y = xyz[1]
+            xmin = min(x)
+            xmax = max(x)
+            ymin = min(y)
+            ymax = max(y)
+            lmax = max(xmax, ymax)
+            lmin = max(xmin, ymin)
+            res = (lmax - lmin) / 1000
+            return [xmin, xmax, ymin, ymax, 0, 0, res]
+        if self.dim == "xyz":
+            x = xyz[0]
+            y = xyz[1]
+            z = xyz[2]
+            xmin = min(x)
+            xmax = max(x)
+            ymin = min(y)
+            ymax = max(y)
+            zmin = min(z)
+            zmax = max(z)
+            lmax = max(xmax, ymax, zmax)
+            lmin = max(xmin, ymin, zmin)
+            res = (lmax - lmin) / 75
+            return [xmin, xmax, ymin, ymax, zmin, zmax, res]
+
+    def set_time(self, dt, t0=0):
+        """
+        set_time set timestep and initial time of data acquisiton
+
+        Args:
+            dt (float): timestep
+            t0 (float): initial time
+        """
+        self.dt = dt
+        self.t0 = t0
+
+    def set_viz_params(
+        self,
+        dpi=300,
+        linewidth=1.5,
+        color="k",
+        cmap="seismic",
+        ax_width=0.5,
+        font="Times New Roman",
+        fontsize=14,
+        height=4,
+        width=5,
+        contour_levels=20,
+    ):
+        """
+        set_viz_params set visualization parameters
+
+        Args:
+            dpi (int, optional): dpi to save figures. Defaults to 300.
+            linewidth (float, optional): line width. Defaults to 1.5.
+            color (str, optional): line color. Defaults to 'k'.
+            cmap (str, optional): color map to use. Defaults to 'seismic'.
+            ax_width (float, optional): linewidth for axes of plots. Defaults to 0.5.
+            font (str, optional): font family used in plots. Defaults to "Times New Roman".
+            fontsize (int, optional): font size used in plots. Defaults to 14.
+            height (int, optional): plot height in inches. Defaults to 4.
+            width (int, optional): plot width in inches. Defaults to 6.
+        """
+        self.dpi = dpi
+        self.linewidth = linewidth
+        self.color = color
+        self.cmap = cmap
+        self.ax_width = ax_width
+        self.font = font
+        self.fontsize = fontsize
+        self.width = width
+        self.height = height
+        self.contour_levels = contour_levels
+
+    def dist_map(self, x, y, bounds):
+        """
+        dist_map generate a kd-tree distance map for all xy coordinates. sed to mask the visualization results for which no data exists
+
+        Args:
+            x (list): list of x coordination values
+            y (list): list of y coordination values
+            bounds (list): domain bounds for visualization [xmin, xmax, ymin, ymax, resolution]
+
+
+        Returns:
+            list: k-d tree distance map for all xy coordination pairs.
+        """
+        from scipy.spatial import KDTree
+
+        xx, yy = self.make_meshgrid(bounds)
+
+        tree = KDTree(np.c_[x, y])
+        dist, _ = tree.query(np.c_[xx.ravel(), yy.ravel()], k=1)
+        dist = dist.reshape(xx.shape)
+        return dist
+
+    def make_meshgrid(self, bounds):
+        """
+        make_meshgrid generates a meshgrid for the domain described by its boundary and meshgrid resolution
+
+        Args:
+            bounds (list): domain bounds for visualization [xmin, xmax, ymin, ymax, resolution]
+
+
+        Returns:
+            ndarray: numpy meshgrid
+        """
+        if self.dim == "xy":
+            xmin, xmax, ymin, ymax, res = bounds
+            mgrid = np.meshgrid(
+                np.arange(
+                    xmin,
+                    xmax + res,
+                    res,
+                ),
+                np.arange(
+                    ymin,
+                    ymax + res,
+                    res,
+                ),
+            )
+            return mgrid
+
+        if self.dim == "xyz":
+            xmin, xmax, ymin, ymax, zmin, zmax, res = bounds
+            mgrid = np.meshgrid(
+                np.arange(
+                    xmin,
+                    xmax + res,
+                    res,
+                ),
+                np.arange(
+                    ymin,
+                    ymax + res,
+                    res,
+                ),
+                np.arange(
+                    zmin,
+                    zmax + res,
+                    res,
+                ),
+            )
+            return mgrid
+
+
+class POD(Base):
+    """
+
+    handle loading and processing csv datasets for POD analysis
+    this class can read csv files in bulk and save to fast parquet format
+    SVD analysis result are stored in parquet format for fast processing
+    pd.Series are serialized and stored in pickle format
+    Refer to svd_example.py, csv_example.py and viz_example.py for examples on how to utilize PARAMOUNT.POD
+
+    Available Functions
+    ----------
+    read_csv_coordinates
+    csv_to_parquet
+    extract_csv_sequential
+    read_csv_sequential
+    check_parquet
+    correlate
+    svd_save_usv
+    svd_correlation
+    correlation_signals
+    svd_correlation_2X
+    svd_correlation_signals
+    read_csv_columns
+    svd_viz
+    s_viz_combined
+
+    """
+
+    def __init__(self, show_dashboard=False) -> None:
+        """
+        initializes a PARAMOUNT POD class
+        Args:
+            show_dashboard (bool, optional): Whether to open dask dashboard in browser. Defaults to False.
+        """
+        super().__init__(show_dashboard)
+        self.set_viz_params()
 
     def svd_save_usv(
         self,
@@ -401,6 +736,8 @@ class POD:
             u, s, v = da.linalg.svd(df.values)
 
             for name, item in zip(["u", "v"], [u, v]):
+                if np.isnan(item.shape[0]):
+                    item = item.compute()
                 result = dd.from_array(item)
                 result.columns = result.columns.astype(str)
                 dd.to_parquet(
@@ -529,108 +866,6 @@ class POD:
             bbox_inches="tight",
         )
         plt.close("all")
-
-    def correlation_signals(
-        self,
-        path_signals=".signals",
-        path_signals2=".signals2",
-        path_viz=".viz",
-    ):
-        """
-        correlation_signals plot correlation heatmap between signals.
-        The signals are assumed to be in pickled format in two folders
-
-        Args:
-            path_signals (str, optional): folder for first set of signals. Defaults to ".usv".
-            path_signals2 (str, optional): folder for second set of signals. Defaults to ".usv2".
-            path_viz (str, optional): path to store plots in. Defaults to ".viz".
-        """
-        import matplotlib.pyplot as plt
-        from mpl_toolkits.axes_grid1 import make_axes_locatable
-
-        utils.ensure_dir(path_viz)
-
-        pathlist = Path(path_signals).resolve().glob("*")
-        pathlist2 = Path(path_signals2).resolve().glob("*")
-
-        signals = []
-        for path in pathlist:
-            signals.append(pd.Series(utils.loadit(path), name=path.name))
-        signaldf = pd.concat(signals, axis=1)
-
-        signals = []
-        for path in pathlist2:
-            signals.append(pd.Series(utils.loadit(path), name=path.name))
-        signaldf2 = pd.concat(signals, axis=1)
-
-        dfcorr_adjusted = pd.DataFrame(
-            np.nan, columns=range(signaldf.shape[1]), index=range(signaldf2.shape[1])
-        )
-        dfcorr = pd.DataFrame(
-            np.nan, columns=range(signaldf.shape[1]), index=range(signaldf2.shape[1])
-        )
-
-        for i in tqdm(range(signaldf.shape[1]), "computing correlations"):
-            for j in range(signaldf2.shape[1]):
-                v1 = signaldf.iloc[:, i]
-                v2 = signaldf2.iloc[:, j]
-                corrcoef, corrcoef_adj = self.correlate(v1, v2)
-                dfcorr.iat[i, j] = corrcoef
-                dfcorr_adjusted.iat[i, j] = corrcoef_adj
-
-        for name, df in zip(["corr", "corr_adjusted"], [dfcorr, dfcorr_adjusted]):
-            fig, ax = plt.subplots()
-            fig.set_size_inches(
-                self.width * signaldf.shape[1] / signaldf2.shape[1], self.width
-            )
-            fig.patch.set_facecolor("w")
-
-            ax1 = ax.imshow(df.abs(), interpolation="none", aspect="equal")
-            ax1.set_clim(0, 1)
-            divider = make_axes_locatable(ax)
-            cax = divider.append_axes(
-                "right",
-                size=self.width * 5 / 100,
-                pad=self.width * 2 / 100,
-            )
-            cbar = fig.colorbar(ax1, cax=cax)
-            cbar.ax.set_xlabel("Correlation Coefficient")
-
-            for i in range(1, 1 + signaldf.shape[1]):
-                ax.axhline(i - 0.5, color="w")
-            for i in range(1, 1 + signaldf2.shape[1]):
-                ax.axvline(i - 0.5, color="w")
-
-            sigloc = np.arange(
-                0,
-                signaldf.shape[1],
-                step=1,
-            )
-            sigloc2 = np.arange(
-                0,
-                signaldf2.shape[1],
-                step=1,
-            )
-            ax.xaxis.set_ticks(
-                sigloc,
-                signaldf.columns,
-                rotation=90,
-                ha="center",
-            )
-            ax.yaxis.set_ticks(
-                sigloc2,
-                signaldf2.columns,
-            )
-
-            ax.xaxis.remove_overlapping_locs = True
-            ax.yaxis.remove_overlapping_locs = False
-
-            plt.savefig(
-                f"{path_viz}/Sigs_{name}" + ".png",
-                dpi=self.dpi,
-                bbox_inches="tight",
-            )
-            plt.close("all")
 
     def svd_correlation_2X(
         self,
@@ -774,7 +1009,7 @@ class POD:
             maxmode (int, optional): maximum number of modes to consider in the correlation map. Defaults to 5.
             path_results_pod (str, optional):  path to read SVD results from. Defaults to ".usv".
             path_signals (str, optional): folder for set of signals. Defaults to ".signals".
-            path_viz (str, optional): _description_. Defaults to ".viz".
+            path_viz (str, optional): path to save results in. Defaults to ".viz".
         """
         import matplotlib.pyplot as plt
         from matplotlib.ticker import AutoMinorLocator, FuncFormatter
@@ -890,57 +1125,6 @@ class POD:
             )
             plt.close("all")
 
-    def make_dim(self, coordinates):
-        """
-        make_dim set the analysis dimensions
-
-        Args:
-            coordinates (str): "2d" or "3d"
-        """
-        coordinates = coordinates.lower().strip()
-        if coordinates == "2d":
-            self.dim = "xy"
-        elif coordinates == "3d":
-            self.dim = "xyz"
-        else:
-            raise ("please specify 2D or 3D as coordinates")
-
-    def make_bounds(self, xyz):
-        """
-        make_bounds define analysis bounds
-
-        Args:
-            xyz (list): x, y ,z coordinate of points
-
-        Returns:
-            list: bounds of analysis and spatial resolution
-        """
-        if self.dim == "xy":
-            x = xyz[0]
-            y = xyz[1]
-            xmin = min(x)
-            xmax = max(x)
-            ymin = min(y)
-            ymax = max(y)
-            lmax = max(xmax, ymax)
-            lmin = max(xmin, ymin)
-            res = (lmax - lmin) / 1000
-            return [xmin, xmax, ymin, ymax, 0, 0, res]
-        if self.dim == "xyz":
-            x = xyz[0]
-            y = xyz[1]
-            z = xyz[2]
-            xmin = min(x)
-            xmax = max(x)
-            ymin = min(y)
-            ymax = max(y)
-            zmin = min(z)
-            zmax = max(z)
-            lmax = max(xmax, ymax, zmax)
-            lmin = max(xmin, ymin, zmin)
-            res = (lmax - lmin) / 75
-            return [xmin, xmax, ymin, ymax, zmin, zmax, res]
-
     def svd_viz(
         self,
         variables,
@@ -999,7 +1183,6 @@ class POD:
                     f"{path_viz}/{var}",
                     modelist,
                     bounds,
-                    freq_max,
                     dist,
                     dist_map,
                 )
@@ -1023,9 +1206,6 @@ class POD:
                     f"{path_viz}/{var}",
                     modelist,
                     bounds,
-                    freq_max,
-                    dist=0,
-                    dist_map=0,
                 )
             self.v_viz(
                 v,
@@ -1058,7 +1238,6 @@ class POD:
 
         s_combined = pd.DataFrame(columns=variables)
         for var in variables:
-
             path_s = Path.cwd() / path_results_pod / f"{var}" / "s.pkl"
             s = utils.loadit(path_s)
 
@@ -1068,125 +1247,6 @@ class POD:
             s_combined[var] = cumsum[:maxmode]
 
         self.s_viz_combined_plot(s_combined, f"{path_viz}")
-
-    def set_time(self, dt, t0=0):
-        """
-        set_time set timestep and initial time of data acquisiton
-
-        Args:
-            dt (float): timestep
-            t0 (float): initial time
-        """
-        self.dt = dt
-        self.t0 = t0
-
-    def set_viz_params(
-        self,
-        dpi=300,
-        linewidth=1.5,
-        color="k",
-        cmap="seismic",
-        ax_width=0.5,
-        font="Times New Roman",
-        fontsize=14,
-        height=4,
-        width=5,
-        contour_levels=20,
-    ):
-        """
-        set_viz_params set visualization parameters
-
-        Args:
-            dpi (int, optional): dpi to save figures. Defaults to 300.
-            linewidth (float, optional): line width. Defaults to 1.5.
-            color (str, optional): line color. Defaults to 'k'.
-            cmap (str, optional): color map to use. Defaults to 'seismic'.
-            ax_width (float, optional): linewidth for axes of plots. Defaults to 0.5.
-            font (str, optional): font family used in plots. Defaults to "Times New Roman".
-            fontsize (int, optional): font size used in plots. Defaults to 14.
-            height (int, optional): plot height in inches. Defaults to 4.
-            width (int, optional): plot width in inches. Defaults to 6.
-        """
-        self.dpi = dpi
-        self.linewidth = linewidth
-        self.color = color
-        self.cmap = cmap
-        self.ax_width = ax_width
-        self.font = font
-        self.fontsize = fontsize
-        self.width = width
-        self.height = height
-        self.contour_levels = contour_levels
-
-    def dist_map(self, x, y, bounds):
-        """
-        dist_map generate a kd-tree distance map for all xy coordinates. sed to mask the visualization results for which no data exists
-
-        Args:
-            x (list): list of x coordination values
-            y (list): list of y coordination values
-            bounds (list): domain bounds for visualization [xmin, xmax, ymin, ymax, resolution]
-
-
-        Returns:
-            list: k-d tree distance map for all xy coordination pairs.
-        """
-        from scipy.spatial import KDTree
-
-        xx, yy = self.make_meshgrid(bounds)
-
-        tree = KDTree(np.c_[x, y])
-        dist, _ = tree.query(np.c_[xx.ravel(), yy.ravel()], k=1)
-        dist = dist.reshape(xx.shape)
-        return dist
-
-    def make_meshgrid(self, bounds):
-        """
-        make_meshgrid generates a meshgrid for the domain described by its boundary and meshgrid resolution
-
-        Args:
-            bounds (list): domain bounds for visualization [xmin, xmax, ymin, ymax, resolution]
-
-
-        Returns:
-            ndarray: numpy meshgrid
-        """
-        if self.dim == "xy":
-            xmin, xmax, ymin, ymax, res = bounds
-            mgrid = np.meshgrid(
-                np.arange(
-                    xmin,
-                    xmax + res,
-                    res,
-                ),
-                np.arange(
-                    ymin,
-                    ymax + res,
-                    res,
-                ),
-            )
-            return mgrid
-
-        if self.dim == "xyz":
-            xmin, xmax, ymin, ymax, zmin, zmax, res = bounds
-            mgrid = np.meshgrid(
-                np.arange(
-                    xmin,
-                    xmax + res,
-                    res,
-                ),
-                np.arange(
-                    ymin,
-                    ymax + res,
-                    res,
-                ),
-                np.arange(
-                    zmin,
-                    zmax + res,
-                    res,
-                ),
-            )
-            return mgrid
 
     def u_viz_3d(
         self,
@@ -1473,7 +1533,7 @@ class POD:
             freqs = freqs[np.where(freqs < freq_max)]
             Pxx = Pxx[: len(freqs)]
             dbPxx = 10 * np.log10(Pxx)
-            peaks, _ = find_peaks(dbPxx, prominence=3)
+            peaks, _ = find_peaks(dbPxx, prominence=10)
             ax.plot(freqs, dbPxx, self.color, linewidth=self.linewidth)
             npeaks = 3
             for n in range(0, min(npeaks, len(peaks))):
@@ -1484,8 +1544,9 @@ class POD:
                     facecolors="none",
                     edgecolors="grey",
                 )
+                acc = int(np.floor(abs(np.log(freq_max))))
                 ax.annotate(
-                    f"{freqs[peaks[n]]:0.0f}",
+                    f"{freqs[peaks[n]]:0.{acc}f}",
                     xy=(freqs[peaks[n]] + freq_max / 25, dbPxx[peaks[n]] * 0.99),
                 )
             fig.tight_layout()
@@ -1582,3 +1643,89 @@ class POD:
             f"{path_viz}/s_combined" + ".png", dpi=self.dpi, bbox_inches="tight"
         )
         plt.close("all")
+
+
+# TODO change name to DMD
+class _DMD(POD):
+    def save_Atilde(
+        self,
+        variables,
+        path_parquet=".data",
+        path_dmd=".dmd",
+    ):
+        variables = variables if type(variables) is list else [variables]
+        v_ = variables.copy()
+        for var in variables:
+            if var in self.get_folderlist(path=path_dmd, boolPrint=False):
+                choice = input(
+                    f"{var.strip()} folder already exists! overwrite existing files? [y/n] "
+                )
+                if choice.lower().strip() == "y":
+                    shutil.rmtree(Path.cwd() / path_dmd / var)
+                else:
+                    v_.remove(var)
+        variables = v_
+
+        try:
+            shutil.copy(Path.cwd() / path_parquet / "x.pkl", path_dmd)
+            shutil.copy(Path.cwd() / path_parquet / "y.pkl", path_dmd)
+            shutil.copy(Path.cwd() / path_parquet / "z.pkl", path_dmd)
+        except:
+            pass
+
+        for var in tqdm(variables, "computing Atilde matrix"):
+            path_var = Path.cwd() / path_parquet / f"{var}"
+            df = dd.read_parquet(path_var, engine="pyarrow").to_dask_array()
+            df1 = df[:, :-1]
+            df2 = df[:, 1:]
+            u, s, v = da.linalg.svd(df1)
+            Atilde = u.transpose().conj().dot(df2).dot(
+                v.transpose().conj()
+            ) * np.reciprocal(s)
+
+            for name, item in zip(["u", "Atilde"], [u, Atilde]):
+                if np.isnan(item.shape[0]):
+                    item = item.compute()
+                result = dd.from_array(item)
+                result.columns = result.columns.astype(str)
+                dd.to_parquet(
+                    result.repartition(partition_size="150MB", force=True),
+                    f"{path_dmd}/{var}/{name}",
+                    compression="snappy",
+                    write_metadata_file=True,
+                )
+
+    def get_init(self, path, index=0):
+        df = dd.read_parquet(path, engine="pyarrow").to_dask_array()
+        return df.T[index]
+
+    def save_modes(self, variables, path_parquet=".data", path_dmd=".dmd"):
+        variables = variables if type(variables) is list else [variables]
+        for var in tqdm(variables, "computing DMD modes and coefficients"):
+            path_Atilde = Path.cwd() / path_dmd / f"{var}" / "Atilde"
+            path_u = Path.cwd() / path_dmd / f"{var}" / "u"
+            Atilde = dd.read_parquet(path_Atilde, engine="pyarrow")
+            Lambda, eigvecs = np.linalg.eig(Atilde)
+            u = dd.read_parquet(path_u, engine="pyarrow")
+            Modes = u.to_dask_array(lengths=True).dot(eigvecs)
+            Modes = Modes.to_dask_dataframe(columns=u.columns,)
+            # dd.to_parquet(
+            #     Modes,
+            #     f"{path_dmd}/{var}/modes",
+            #     compression="snappy",
+            #     write_metadata_file=True,
+            # )
+            utils.saveit(Modes.compute(), f"{path_dmd}/{var}/modes.pkl")
+            init = self.get_init(path_parquet)
+            b_amp = da.linalg.lstsq(Modes, init)[0]
+            utils.saveit(b_amp, f"{path_dmd}/{var}/b.pkl")
+            utils.saveit(Lambda, f"{path_dmd}/{var}/lambda.pkl")
+
+    def viz_eigs(self):
+        pass
+
+    def viz_modes(self):
+        pass
+
+    def mres_dmd(self):
+        pass
