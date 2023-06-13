@@ -60,7 +60,9 @@ class utils:
     @staticmethod
     def saveit(obj: object, name: str) -> None:
         import pickle
+        from pathlib import Path
 
+        utils.ensure_dir(Path(name).parent)
         with open(name, "wb") as f:
             pickle.dump(obj, f)
 

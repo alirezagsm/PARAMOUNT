@@ -13,6 +13,8 @@ from tqdm import tqdm
 
 # suppress dask user warnings
 logging.getLogger("distributed").setLevel(logging.CRITICAL)
+
+
 # logging.getLogger("distributed.utils_perf").setLevel(logging.CRITICAL)
 # logging.getLogger("distributed.diskutils").setLevel(logging.CRITICAL)
 # logging.getLogger("distributed.worker_memory").setLevel(logging.CRITICAL)
@@ -520,7 +522,7 @@ class Base:
             lmax = max(xmax, ymax)
             lmin = max(xmin, ymin)
             res = (lmax - lmin) / 1000
-            return [xmin, xmax, ymin, ymax, 0, 0, res]
+            return [xmin, xmax, ymin, ymax, res]
         if self.dim == "xyz":
             x = xyz[0]
             y = xyz[1]
@@ -697,7 +699,7 @@ class POD(Base):
         self,
         variables,
         path_parquet=".data",
-        path_results_pod=".usv",
+        path_pod=".usv",
     ):
         """
         svd_save_usv compute distributed Singular Value Decomposition and store results in parquet format.
@@ -705,7 +707,7 @@ class POD(Base):
         Args:
             variables (list or str): list of variables to consider
             path_parquet (str, optional): path to parquet datasets. Defaults to ".data".
-            path_results_pod (str, optional): path to store SVD results in. Defaults to ".usv".
+            path_pod (str, optional): path to store SVD results in. Defaults to ".usv".
 
         Raises:
             ValueError: checking for existing folders and warn user about unwanted overwrites
@@ -713,44 +715,46 @@ class POD(Base):
         variables = variables if type(variables) is list else [variables]
         v_ = variables.copy()
         for var in variables:
-            if var in self.get_folderlist(path=path_results_pod, boolPrint=False):
+            if var in self.get_folderlist(path=path_pod, boolPrint=False):
                 choice = input(
                     f"{var.strip()} folder already exists! overwrite existing files? [y/n] "
                 )
                 if choice.lower().strip() == "y":
-                    shutil.rmtree(Path.cwd() / path_results_pod / var)
+                    shutil.rmtree(Path.cwd() / path_pod / var)
                 else:
                     v_.remove(var)
         variables = v_
 
         try:
-            shutil.copy(Path.cwd() / path_parquet / "x.pkl", path_results_pod)
-            shutil.copy(Path.cwd() / path_parquet / "y.pkl", path_results_pod)
-            shutil.copy(Path.cwd() / path_parquet / "z.pkl", path_results_pod)
+            shutil.copy(Path.cwd() / path_parquet / "x.pkl", path_pod)
+            shutil.copy(Path.cwd() / path_parquet / "y.pkl", path_pod)
+            shutil.copy(Path.cwd() / path_parquet / "z.pkl", path_pod)
         except:
             pass
 
         for var in tqdm(variables, "computing SVD modes"):
             path = Path.cwd() / path_parquet / f"{var}"
+            utils.ensure_dir(path)
+
             df = dd.read_parquet(path, engine="pyarrow")
             u, s, v = da.linalg.svd(df.values)
 
             for name, item in zip(["u", "v"], [u, v]):
-                if np.isnan(item.shape[0]):
-                    item = item.compute()
+                # uncomment if dask complains about unknown dimensions
+                # if np.isnan(item.shape[0]):
+                #     item = item.compute()
                 result = dd.from_array(item)
                 result.columns = result.columns.astype(str)
                 dd.to_parquet(
                     result,
-                    f"{path_results_pod}/{var}/{name}",
+                    f"{path_pod}/{var}/{name}",
                     compression="snappy",
                     write_metadata_file=True,
                 )
-            utils.saveit(s.compute(), f"{path_results_pod}/{var}/s.pkl")
+            result = dd.from_array(s).compute()
+            utils.saveit(result, f"{path_pod}/{var}/s.pkl")
 
-    def svd_correlation(
-        self, variables, maxmode=5, path_results_pod=".usv", path_viz=".viz"
-    ):
+    def svd_correlation(self, variables, maxmode=5, path_pod=".usv", path_viz=".viz"):
         """
         svd_correlation produces correlation heatmap between modes for specified variables.
         The correlation map shows the default Pearson's correlation between mode pairs on the lower triangle
@@ -760,7 +764,7 @@ class POD(Base):
         Args:
             variables (list): list of variables to consider in the correlation map
             maxmode (int, optional): maximum number of modes to consider in the correlation map. Defaults to 5.
-            path_results_pod (str, optional):  path to read SVD results from. Defaults to ".usv".
+            path_pod (str, optional):  path to read SVD results from. Defaults to ".usv".
             path_viz (str, optional): path to store plots in. Defaults to ".viz".
         """
 
@@ -775,12 +779,13 @@ class POD(Base):
 
         utils.ensure_dir(path_viz)
 
+        maxmode = max(list(maxmode))
         variables = variables if type(variables) is list else [variables]
-        path_v = Path.cwd() / path_results_pod / f"{variables[0]}" / "v"
+        path_v = Path.cwd() / path_pod / f"{variables[0]}" / "v"
         df = dd.read_parquet(path_v, engine="pyarrow")
         df = df.compute().iloc[:maxmode, :].transpose()
         for v in variables[1:]:
-            path_v = Path.cwd() / path_results_pod / f"{v}" / "v"
+            path_v = Path.cwd() / path_pod / f"{v}" / "v"
             df2 = dd.read_parquet(path_v, engine="pyarrow")
             df2 = df2.compute().iloc[:maxmode, :].transpose()
             df = pd.concat([df, df2], axis=1)
@@ -802,7 +807,7 @@ class POD(Base):
         for result in results:
             corr_adjusted.iat[result[0][0], result[0][1]] = result[1]
         corr = df.corr()
-        corr = corr.where(np.tril(np.ones(corr.shape), k=0).astype(np.bool)).abs()
+        corr = corr.where(np.tril(np.ones(corr.shape), k=0).astype(bool)).abs()
         fig, ax = plt.subplots()
         fig.set_size_inches(self.width * 2, self.width * 2)
         fig.patch.set_facecolor("w")
@@ -871,8 +876,8 @@ class POD(Base):
         self,
         variables,
         maxmode=11,
-        path_results_pod=".usv",
-        path_results_pod2=".usv2",
+        path_pod=".usv",
+        path_pod2=".usv2",
         path_viz=".corr2X",
     ):
         """
@@ -881,8 +886,8 @@ class POD(Base):
         Args:
             variables (list): variables to consider
             maxmode (int, optional): maximum mode number to include in analysis. Defaults to 11.
-            path_results_pod (str, optional): first results folder. Will be shown as the y axis. Defaults to ".usv".
-            path_results_pod2 (str, optional): second results folder. Will be shown as the x axis. Defaults to ".usv2".
+            path_pod (str, optional): first results folder. Will be shown as the y axis. Defaults to ".usv".
+            path_pod2 (str, optional): second results folder. Will be shown as the x axis. Defaults to ".usv2".
             path_viz (str, optional): path to store plots in. Defaults to ".corr2X".
         """
         import matplotlib.pyplot as plt
@@ -897,17 +902,17 @@ class POD(Base):
 
         variables = variables if type(variables) is list else [variables]
 
-        path_v = Path.cwd() / path_results_pod / f"{variables[0]}" / "v"
+        path_v = Path.cwd() / path_pod / f"{variables[0]}" / "v"
         df = dd.read_parquet(path_v, engine="pyarrow")
         df = df.compute().iloc[:maxmode, :].transpose()
         for v in variables[1:]:
-            path_v = Path.cwd() / path_results_pod / f"{v}" / "v"
+            path_v = Path.cwd() / path_pod / f"{v}" / "v"
             df2 = dd.read_parquet(path_v, engine="pyarrow")
             df2 = df2.compute().iloc[:maxmode, :].transpose()
             df = pd.concat([df, df2], axis=1)
 
         for v in variables:
-            path_v = Path.cwd() / path_results_pod2 / f"{v}" / "v"
+            path_v = Path.cwd() / path_pod2 / f"{v}" / "v"
             df2 = dd.read_parquet(path_v, engine="pyarrow")
             df2 = df2.compute().iloc[:maxmode, :].transpose()
             df = pd.concat([df, df2], axis=1)
@@ -996,7 +1001,7 @@ class POD(Base):
         self,
         variables,
         maxmode=5,
-        path_results_pod=".usv",
+        path_pod=".usv",
         path_signals=".signals",
         path_viz=".viz",
     ):
@@ -1007,7 +1012,7 @@ class POD(Base):
         Args:
             variables (list): list of variables to consider in the correlation map
             maxmode (int, optional): maximum number of modes to consider in the correlation map. Defaults to 5.
-            path_results_pod (str, optional):  path to read SVD results from. Defaults to ".usv".
+            path_pod (str, optional):  path to read SVD results from. Defaults to ".usv".
             path_signals (str, optional): folder for set of signals. Defaults to ".signals".
             path_viz (str, optional): path to save results in. Defaults to ".viz".
         """
@@ -1022,11 +1027,11 @@ class POD(Base):
 
         variables = variables if type(variables) is list else [variables]
 
-        path_v = Path.cwd() / path_results_pod / f"{variables[0]}" / "v"
+        path_v = Path.cwd() / path_pod / f"{variables[0]}" / "v"
         df = dd.read_parquet(path_v, engine="pyarrow")
         df = df.compute().iloc[:maxmode, :].transpose()
         for v in variables[1:]:
-            path_v = Path.cwd() / path_results_pod / f"{v}" / "v"
+            path_v = Path.cwd() / path_pod / f"{v}" / "v"
             df2 = dd.read_parquet(path_v, engine="pyarrow")
             df2 = df2.compute().iloc[:maxmode, :].transpose()
             df = pd.concat([df, df2], axis=1)
@@ -1131,7 +1136,7 @@ class POD(Base):
         modelist,
         bounds="auto",
         coordinates="2D",
-        path_results_pod=".usv",
+        path_pod=".usv",
         path_viz=".viz",
         freq_max=3000,
         dist=False,
@@ -1144,7 +1149,7 @@ class POD(Base):
             modelist (list): modes to consider
             bounds (list): domain bounds for visualization [xmin, xmax, ymin, ymax, resolution]
             coordinates (str): "2D" or "3D" visualization of modes
-            path_results_pod (str, optional): path to read SVD results from. Defaults to ".usv".
+            path_pod (str, optional): path to read SVD results from. Defaults to ".usv".
             path_viz (str, optional): path to store plots in. Defaults to ".viz".
             freq_max (float, optional): maximum frequency of interest for PSD plots. Defaults to 3kHz.
             dist (float or bool): distance threshold to mask the xy meshgrid using k-d tree method. Defaults to False.
@@ -1157,16 +1162,16 @@ class POD(Base):
         for var in tqdm(variables, "analyzing variables"):
             utils.ensure_dir(f"{path_viz}/{var}")
 
-            path_u = Path.cwd() / path_results_pod / f"{var}" / "u"
-            path_v = Path.cwd() / path_results_pod / f"{var}" / "v"
-            path_s = Path.cwd() / path_results_pod / f"{var}" / "s.pkl"
+            path_u = Path.cwd() / path_pod / f"{var}" / "u"
+            path_v = Path.cwd() / path_pod / f"{var}" / "v"
+            path_s = Path.cwd() / path_pod / f"{var}" / "s.pkl"
             u = dd.read_parquet(path_u, engine="pyarrow")
             v = dd.read_parquet(path_v, engine="pyarrow")
             s = utils.loadit(path_s)
 
             if self.dim == "xy":
-                path_x = Path.cwd() / path_results_pod / "x.pkl"
-                path_y = Path.cwd() / path_results_pod / "y.pkl"
+                path_x = Path.cwd() / path_pod / "x.pkl"
+                path_y = Path.cwd() / path_pod / "y.pkl"
                 x = utils.loadit(path_x)
                 y = utils.loadit(path_y)
 
@@ -1188,9 +1193,9 @@ class POD(Base):
                 )
 
             if self.dim == "xyz":
-                path_x = Path.cwd() / path_results_pod / "x.pkl"
-                path_y = Path.cwd() / path_results_pod / "y.pkl"
-                path_z = Path.cwd() / path_results_pod / "z.pkl"
+                path_x = Path.cwd() / path_pod / "x.pkl"
+                path_y = Path.cwd() / path_pod / "y.pkl"
+                path_z = Path.cwd() / path_pod / "z.pkl"
                 x = utils.loadit(path_x)
                 y = utils.loadit(path_y)
                 z = utils.loadit(path_z)
@@ -1219,7 +1224,7 @@ class POD(Base):
         self,
         variables,
         maxmode=100,
-        path_results_pod=".usv",
+        path_pod=".usv",
         path_viz=".viz",
     ):
         """
@@ -1228,7 +1233,7 @@ class POD(Base):
         Args:
             variables (list or str): list of variables to consider
             maxmode (int): final mode to consider. Defaults to 100
-            path_results_pod (str, optional): path to read SVD results from. Defaults to ".usv".
+            path_pod (str, optional): path to read SVD results from. Defaults to ".usv".
             path_viz (str, optional): path to store plots in. Defaults to ".viz".
         """
 
@@ -1238,11 +1243,11 @@ class POD(Base):
 
         s_combined = pd.DataFrame(columns=variables)
         for var in variables:
-            path_s = Path.cwd() / path_results_pod / f"{var}" / "s.pkl"
+            path_s = Path.cwd() / path_pod / f"{var}" / "s.pkl"
             s = utils.loadit(path_s)
 
             mode_energy = [x**2 for x in s]
-            mode_energy = mode_energy / sum(mode_energy) * 100
+            mode_energy = [x / sum(mode_energy) * 100 for x in mode_energy]
             cumsum = np.cumsum(mode_energy)
             s_combined[var] = cumsum[:maxmode]
 
@@ -1420,6 +1425,7 @@ class POD(Base):
         from scipy.interpolate import griddata
         import matplotlib.pyplot as plt
 
+        plt.switch_backend("agg")
         plt.rc("font", family=self.font)
         plt.rc("font", size=self.fontsize)
 
@@ -1533,7 +1539,7 @@ class POD(Base):
             freqs = freqs[np.where(freqs < freq_max)]
             Pxx = Pxx[: len(freqs)]
             dbPxx = 10 * np.log10(Pxx)
-            peaks, _ = find_peaks(dbPxx, prominence=10)
+            peaks, _ = find_peaks(dbPxx, prominence=3)
             ax.plot(freqs, dbPxx, self.color, linewidth=self.linewidth)
             npeaks = 3
             for n in range(0, min(npeaks, len(peaks))):
@@ -1544,7 +1550,9 @@ class POD(Base):
                     facecolors="none",
                     edgecolors="grey",
                 )
-                acc = int(np.floor(abs(np.log(freq_max))))
+                acc = 0
+                if freq_max < 10:
+                    acc = 2
                 ax.annotate(
                     f"{freqs[peaks[n]]:0.{acc}f}",
                     xy=(freqs[peaks[n]] + freq_max / 25, dbPxx[peaks[n]] * 0.99),
@@ -1584,7 +1592,7 @@ class POD(Base):
         ax.grid(alpha=0.5, which="both")
 
         mode_energy = [x**2 for x in s]
-        mode_energy = mode_energy / sum(mode_energy) * 100
+        mode_energy = [x / sum(mode_energy) * 100 for x in mode_energy]
         cumsum = np.cumsum(mode_energy)
         s = cumsum[:maxmode]
         ax.set_ylim(s[0] - 10, 100)
@@ -1609,6 +1617,7 @@ class POD(Base):
         import matplotlib.pyplot as plt
         import matplotlib.ticker as mtick
 
+        plt.switch_backend("agg")
         plt.rc("font", family=self.font)
         plt.rc("font", size=self.fontsize)
 
@@ -1645,8 +1654,7 @@ class POD(Base):
         plt.close("all")
 
 
-# TODO change name to DMD
-class _DMD(POD):
+class DMD(POD):
     def save_Atilde(
         self,
         variables,
@@ -1684,16 +1692,18 @@ class _DMD(POD):
             ) * np.reciprocal(s)
 
             for name, item in zip(["u", "Atilde"], [u, Atilde]):
-                if np.isnan(item.shape[0]):
-                    item = item.compute()
+                # if np.isnan(item.shape[0]):
+                #     item = item.compute()
                 result = dd.from_array(item)
                 result.columns = result.columns.astype(str)
                 dd.to_parquet(
-                    result.repartition(partition_size="150MB", force=True),
+                    result,
                     f"{path_dmd}/{var}/{name}",
                     compression="snappy",
                     write_metadata_file=True,
                 )
+            result = dd.from_array(s).compute()
+            utils.saveit(result, f"{path_dmd}/{var}/s.pkl")
 
     def get_init(self, path, index=0):
         df = dd.read_parquet(path, engine="pyarrow").to_dask_array()
@@ -1707,25 +1717,205 @@ class _DMD(POD):
             Atilde = dd.read_parquet(path_Atilde, engine="pyarrow")
             Lambda, eigvecs = np.linalg.eig(Atilde)
             u = dd.read_parquet(path_u, engine="pyarrow")
-            Modes = u.to_dask_array(lengths=True).dot(eigvecs)
-            Modes = Modes.to_dask_dataframe(columns=u.columns,)
-            # dd.to_parquet(
-            #     Modes,
-            #     f"{path_dmd}/{var}/modes",
-            #     compression="snappy",
-            #     write_metadata_file=True,
-            # )
-            utils.saveit(Modes.compute(), f"{path_dmd}/{var}/modes.pkl")
-            init = self.get_init(path_parquet)
+            Modes = u.to_dask_array(lengths=True).dot(np.real(eigvecs))
+            Modes_pq = Modes.to_dask_dataframe(
+                columns=u.columns,
+            )
+            Modes_pq.columns = Modes_pq.columns.astype(str)
+            # for now pyarrow does not support complex128 dtype
+            # utils.saveit(Modes2.compute(), f"{path_dmd}/{var}/modes.pkl")
+            dd.to_parquet(
+                Modes_pq,
+                f"{path_dmd}/{var}/modes",
+                compression="snappy",
+                write_metadata_file=True,
+            )
+            init = self.get_init(f"{path_parquet}/{var}")
+            init.compute_chunk_sizes()
             b_amp = da.linalg.lstsq(Modes, init)[0]
-            utils.saveit(b_amp, f"{path_dmd}/{var}/b.pkl")
+            utils.saveit(b_amp.compute(), f"{path_dmd}/{var}/b.pkl")
             utils.saveit(Lambda, f"{path_dmd}/{var}/lambda.pkl")
 
-    def viz_eigs(self):
-        pass
+    def viz_eigs(self, variables, path_dmd=".dmd", path_viz=".viz", maxmode=100):
+        variables = variables if type(variables) is list else [variables]
+        import matplotlib.pyplot as plt
+        import matplotlib.ticker as mtick
 
-    def viz_modes(self):
-        pass
+        plt.switch_backend("agg")
+        plt.rc("font", family=self.font)
+        plt.rc("font", size=self.fontsize)
+        for var in tqdm(variables, "plotting DMD modes eigenvalues"):
+            utils.ensure_dir(f"{path_viz}/{var}")
+            eigs = utils.loadit(f"{path_dmd}/{var}/lambda.pkl")[:maxmode]
+
+            fig, ax = plt.subplots(1)
+            fig.set_size_inches(self.width, self.height)
+            fig.patch.set_facecolor("w")
+            ax.set_xlabel("Real")
+            ax.set_ylabel("Imag")
+            ax.set_axisbelow(True)
+            ax.grid(alpha=0.5, which="both")
+
+            ax.set_ylim(-1.05, 1.05)
+            ax.set_xlim(-1.05, 1.05)
+            ax.set_aspect(1)
+            circ = plt.Circle((0, 0), radius=1, edgecolor="black", facecolor="None")
+            ax.add_patch(circ)
+            ax.scatter(
+                np.real(eigs),
+                np.imag(eigs),
+                s=60,
+                facecolors="none",
+                edgecolors="black",
+            )
+
+            fig.tight_layout()
+            for axis in ["bottom", "left"]:
+                ax.spines[axis].set_linewidth(self.ax_width)
+            for axis in ["top", "right"]:
+                ax.spines[axis].set_linewidth(0)
+            plt.savefig(
+                f"{path_viz}/{var}/eigs" + ".png", dpi=self.dpi, bbox_inches="tight"
+            )
+            plt.close("all")
+
+    def viz_modes(
+        self,
+        variables,
+        modelist,
+        coordinates="2D",
+        path_dmd=".dmd",
+        path_viz=".viz",
+        bounds="auto",
+        dist=False,
+    ):
+        variables = variables if type(variables) is list else [variables]
+        modelist = modelist if type(modelist) is list else list(modelist)
+
+        self.make_dim(coordinates)
+
+        for var in tqdm(variables, "analyzing variables"):
+            utils.ensure_dir(f"{path_viz}/{var}")
+
+            path_modes = Path.cwd() / f"{var}" / "modes"
+
+            if self.dim == "xy":
+                path_x = f"{path_dmd}/x.pkl"
+                path_y = f"{path_dmd}/y.pkl"
+                x = utils.loadit(path_x)
+                y = utils.loadit(path_y)
+
+                if bounds == "auto":
+                    bounds = self.make_bounds([x, y])
+
+                if dist:
+                    dist_map = self.dist_map(x, y, bounds)
+
+            from scipy.interpolate import griddata
+            import matplotlib.pyplot as plt
+
+            plt.switch_backend("agg")
+            plt.rc("font", family=self.font)
+            plt.rc("font", size=self.fontsize)
+
+            xmin, xmax, ymin, ymax, res = bounds
+            xx, yy = self.make_meshgrid(bounds)
+
+            for mode in tqdm(modelist, "plotting 2D mode shapes", leave=False):
+                dmd_mode = dd.read_parquet(f"{path_dmd}/{var}/modes", engine="pyarrow")
+                dm = dmd_mode.iloc[:, mode].compute()
+                kk = griddata(
+                    (x, y),
+                    dm,
+                    (xx, yy),
+                    method="linear",
+                    fill_value=min(abs(dm)),
+                )
+                if dist is not None:
+                    # adjust this threshold according to your mesh size
+                    # this will mask out the parts of visualization for
+                    # which the distance between points exceeds a certain value
+                    kk[dist_map >= dist] = np.nan
+
+                fig, ax = plt.subplots(1)
+                fig.set_size_inches(self.width, self.height)
+                fig.patch.set_facecolor("w")
+                ax.set_xlabel("")
+                ax.set_ylabel("")
+                ax.axes.xaxis.set_visible(False)
+                ax.axes.yaxis.set_visible(False)
+                ax.set_xlim(xmin, xmax)
+                ax.set_ylim(ymin, ymax)
+                ax.set_aspect(1)
+                ax.set_axisbelow(True)
+                ax.grid(alpha=0.5)
+                kk[np.isnan(kk)] = np.min(abs(kk))
+
+                contour = ax.contourf(
+                    xx,
+                    yy,
+                    kk,
+                    self.contour_levels,
+                    cmap=self.cmap,
+                    antialiased=True,
+                    extend="both",
+                )
+                for c in contour.collections:
+                    c.set_edgecolor("face")
+                fig.tight_layout()
+                for axis in ["top", "bottom", "left", "right"]:
+                    ax.spines[axis].set_linewidth(self.ax_width)
+                plt.savefig(
+                    f"{path_viz}/{var}/dmd_mode{mode}" + ".png",
+                    dpi=self.dpi,
+                    bbox_inches="tight",
+                )
+                plt.close("all")
+
+    def predict(
+        self,
+        variables,
+        coordinates="2D",
+        path_parquet=".data",
+        path_dmd=".dmd",
+        path_viz=".viz",
+        start=0,
+        frames=10,
+        bounds="auto",
+        dist=None,
+    ):
+        variables = variables if type(variables) is list else [variables]
+        self.make_dim(coordinates)
+
+        if self.dim == "xy":
+            path_x = f"{path_dmd}/x.pkl"
+            path_y = f"{path_dmd}/y.pkl"
+            x = utils.loadit(path_x)
+            y = utils.loadit(path_y)
+
+            if bounds == "auto":
+                bounds = self.make_bounds([x, y])
+
+            if dist:
+                dist_map = self.dist_map(x, y, bounds)
+
+        for var in tqdm(variables, "predicting variables"):
+            utils.ensure_dir(f"{path_viz}/{var}/frames")
+            path_frames = Path.cwd() / f"{var}" / "frames"
+            path_dmd_values = Path.cwd() / path_dmd / f"{var}"
+
+            init = self.get_init(f"{path_parquet}/{var}")
+            init.compute_chunk_sizes()
+
+            Atilde = dd.read_parquet(path_dmd_values / "Atilde", engine="pyarrow")
+            b = utils.loadit(path_dmd_values / "b.pkl")
+            eigs = utils.loadit(path_dmd_values / "lambda.pkl")
+            omega = np.log(eigs) / self.dt
+            modes = dd.read_parquet(path_dmd_values / "modes", engine="pyarrow")
+            modes = modes.to_dask_array(lengths=True)
+
+            for frame in range(start, frames):
+                prediction = modes.dot(np.real(eigs)).dot(np.linalg.pinv(modes)).dot(init)
 
     def mres_dmd(self):
         pass
