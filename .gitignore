@@ -1,7 +1,6 @@
 # Exclude .folders and .files
 .*
 !.gitignore
-!.env
 
 # Exclude dask worker space
 dask-worker-space/
