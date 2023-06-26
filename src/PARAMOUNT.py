@@ -76,6 +76,23 @@ class Base:
         if boolPrint:
             print(pd.DataFrame({"Available headers": headers}))
         return headers
+    
+    @staticmethod
+    def check_csv(
+        path_csv=Path.cwd(),
+        delimiter=",",
+        skiprows=0,
+    ):
+        pathlist = sorted(Path(path_csv).resolve().glob("*.csv"))
+        result0 = pd.read_csv(pathlist[0], sep=delimiter, skiprows=skiprows)
+        for path_csv in tqdm(pathlist[1:], "Comparing csv line numbers"):
+            result = pd.read_csv(path_csv, sep=delimiter, skiprows=skiprows)
+            if result.shape != result0.shape:
+                print(" Mismatch found")
+                print(f"{path_csv.name} {result.shape}")
+        
+
+
 
     @staticmethod
     def get_folderlist(path=".data", boolPrint=True):
@@ -745,12 +762,14 @@ class POD(Base):
                 #     item = item.compute()
                 result = dd.from_array(item)
                 result.columns = result.columns.astype(str)
+                # set write_metadata_file to False in case of worker error
                 dd.to_parquet(
                     result,
                     f"{path_pod}/{var}/{name}",
                     compression="snappy",
                     write_metadata_file=True,
                 )
+                del result
             result = dd.from_array(s).compute()
             utils.saveit(result, f"{path_pod}/{var}/s.pkl")
 
