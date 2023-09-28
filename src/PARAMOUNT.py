@@ -76,7 +76,7 @@ class Base:
         if boolPrint:
             print(pd.DataFrame({"Available headers": headers}))
         return headers
-    
+
     @staticmethod
     def check_csv(
         path_csv=Path.cwd(),
@@ -90,9 +90,6 @@ class Base:
             if result.shape != result0.shape:
                 print(" Mismatch found")
                 print(f"{path_csv.name} {result.shape}")
-        
-
-
 
     @staticmethod
     def get_folderlist(path=".data", boolPrint=True):
@@ -1680,8 +1677,11 @@ class DMD(POD):
         path_parquet=".data",
         path_dmd=".dmd",
     ):
+        """
+        save_Atilde compute Atilde, u and s matrices and save them in parquet or pickle format
+        """
         variables = variables if type(variables) is list else [variables]
-        v_ = variables.copy()
+        _v = variables.copy()
         for var in variables:
             if var in self.get_folderlist(path=path_dmd, boolPrint=False):
                 choice = input(
@@ -1690,8 +1690,8 @@ class DMD(POD):
                 if choice.lower().strip() == "y":
                     shutil.rmtree(Path.cwd() / path_dmd / var)
                 else:
-                    v_.remove(var)
-        variables = v_
+                    _v.remove(var)
+        variables = _v
 
         try:
             shutil.copy(Path.cwd() / path_parquet / "x.pkl", path_dmd)
@@ -1736,6 +1736,7 @@ class DMD(POD):
             Atilde = dd.read_parquet(path_Atilde, engine="pyarrow")
             Lambda, eigvecs = np.linalg.eig(Atilde)
             u = dd.read_parquet(path_u, engine="pyarrow")
+            # compute the projected DMD modes
             Modes = u.to_dask_array(lengths=True).dot(np.real(eigvecs))
             Modes_pq = Modes.to_dask_dataframe(
                 columns=u.columns,
@@ -1751,6 +1752,8 @@ class DMD(POD):
             )
             init = self.get_init(f"{path_parquet}/{var}")
             init.compute_chunk_sizes()
+            # Moore–Penrose pseudoinverse 
+            # The pseudoinverse is equivalent to finding the best-fit solution b in the least-squares sense.
             b_amp = da.linalg.lstsq(Modes, init)[0]
             utils.saveit(b_amp.compute(), f"{path_dmd}/{var}/b.pkl")
             utils.saveit(Lambda, f"{path_dmd}/{var}/lambda.pkl")
@@ -1759,6 +1762,7 @@ class DMD(POD):
         variables = variables if type(variables) is list else [variables]
         import matplotlib.pyplot as plt
         import matplotlib.ticker as mtick
+        from matplotlib.colors import Normalize
 
         plt.switch_backend("agg")
         plt.rc("font", family=self.font)
@@ -1784,8 +1788,8 @@ class DMD(POD):
                 np.real(eigs),
                 np.imag(eigs),
                 s=60,
-                facecolors="none",
-                edgecolors="black",
+                c=np.abs(eigs),
+                edgecolors="none",
             )
 
             fig.tight_layout()
@@ -1850,7 +1854,7 @@ class DMD(POD):
                     method="linear",
                     fill_value=min(abs(dm)),
                 )
-                if dist is not None:
+                if dist:
                     # adjust this threshold according to your mesh size
                     # this will mask out the parts of visualization for
                     # which the distance between points exceeds a certain value
@@ -1934,7 +1938,11 @@ class DMD(POD):
             modes = modes.to_dask_array(lengths=True)
 
             for frame in range(start, frames):
-                prediction = modes.dot(np.real(eigs)).dot(np.linalg.pinv(modes)).dot(init)
+                prediction = (
+                    modes.dot(np.real(eigs)).dot(np.linalg.pinv(modes)).dot(init)
+                )
 
     def mres_dmd(self):
+        # Idea: apply DMD at multiple levels of coarse graining and somehow comnbine them into a unified representation
+        # This makes it possible to gain insight into the dynamics at different scales and how they influence each other
         pass
