@@ -563,6 +563,15 @@ class Base:
         self.dt = dt
         self.t0 = t0
 
+    def set_skip(self, skip):
+        """
+        set_skip set skip for snapshots
+
+        Args:
+            skip (int): number of snapshots to skip
+        """
+        self.skip = skip
+
     def set_viz_params(
         self,
         dpi=300,
@@ -751,6 +760,9 @@ class POD(Base):
             utils.ensure_dir(path)
 
             df = dd.read_parquet(path, engine="pyarrow")
+            # skip columns for every self.skip if set
+            if self.skip > 1:
+                df = df.iloc[:, :: self.skip]
             u, s, v = da.linalg.svd(df.values)
 
             for name, item in zip(["u", "v"], [u, v]):
@@ -1449,7 +1461,12 @@ class POD(Base):
         xx, yy = self.make_meshgrid(bounds)
 
         for mode in tqdm(modelist, "plotting 2D mode shapes", leave=False):
-            uu = u.iloc[:, mode].compute()
+            if isinstance(u, dd.DataFrame):
+                uu = u.iloc[:, mode].compute()
+            elif isinstance(u, pd.DataFrame):
+                uu = u.iloc[:, mode]
+            else:
+                exception = "u must be a pandas or dask dataframe"
             kk = griddata(
                 (x, y),
                 uu,
@@ -1703,6 +1720,8 @@ class DMD(POD):
         for var in tqdm(variables, "computing Atilde matrix"):
             path_var = Path.cwd() / path_parquet / f"{var}"
             df = dd.read_parquet(path_var, engine="pyarrow").to_dask_array()
+            if self.skip > 1:
+                df = df[:, :: self.skip]
             df1 = df[:, :-1]
             df2 = df[:, 1:]
             u, s, v = da.linalg.svd(df1)
@@ -1737,28 +1756,129 @@ class DMD(POD):
             Lambda, eigvecs = np.linalg.eig(Atilde)
             u = dd.read_parquet(path_u, engine="pyarrow")
             # compute the projected DMD modes
-            Modes = u.to_dask_array(lengths=True).dot(np.real(eigvecs))
-            Modes_pq = Modes.to_dask_dataframe(
+            phi = u.to_dask_array(lengths=True).dot(np.real(eigvecs))
+            phi_pq = phi.to_dask_dataframe(
                 columns=u.columns,
             )
-            Modes_pq.columns = Modes_pq.columns.astype(str)
+            phi_pq.columns = phi_pq.columns.astype(str)
             # for now pyarrow does not support complex128 dtype
             # utils.saveit(Modes2.compute(), f"{path_dmd}/{var}/modes.pkl")
             dd.to_parquet(
-                Modes_pq,
+                phi_pq,
                 f"{path_dmd}/{var}/modes",
                 compression="snappy",
                 write_metadata_file=True,
             )
             init = self.get_init(f"{path_parquet}/{var}")
-            init.compute_chunk_sizes()
-            # Moore–Penrose pseudoinverse 
+            # init.compute_chunk_sizes()
+            # Moore–Penrose pseudoinverse
             # The pseudoinverse is equivalent to finding the best-fit solution b in the least-squares sense.
-            b_amp = da.linalg.lstsq(Modes, init)[0]
-            utils.saveit(b_amp.compute(), f"{path_dmd}/{var}/b.pkl")
+            # b = da.linalg.lstsq(phi, init)[0]
+            b = np.linalg.pinv(phi).dot(init)
+            utils.saveit(b, f"{path_dmd}/{var}/b.pkl")
             utils.saveit(Lambda, f"{path_dmd}/{var}/lambda.pkl")
 
-    def viz_eigs(self, variables, path_dmd=".dmd", path_viz=".viz", maxmode=100):
+    def save_prediction(
+        self,
+        variables,
+        path_dmd=".dmd",
+        start=0,
+        frames=None,
+    ):
+        variables = variables if type(variables) is list else [variables]
+
+        for var in tqdm(variables, "predicting variables"):
+            # path_frames = Path.cwd() / f"{var}" / "frames"
+            path_dmd_values = Path.cwd() / path_dmd / f"{var}"
+
+            # init = self.get_init(f"{path_parquet}/{var}")
+            # init.compute_chunk_sizes()
+
+            # Atilde = dd.read_parquet(path_dmd_values / "Atilde", engine="pyarrow")
+            b = utils.loadit(path_dmd_values / "b.pkl")
+            eigs = utils.loadit(path_dmd_values / "lambda.pkl")
+            omega = np.log(eigs) / self.dt
+            phi = dd.read_parquet(path_dmd_values / "modes", engine="pyarrow")
+            phi = phi.to_dask_array(lengths=True)
+
+            _tds = []
+            if frames is None:
+                frames = phi.shape[1]
+            for frame in range(start, frames):
+                _tds.append(b * da.exp(np.real(omega) * (start + self.dt * frame)))
+            # reconstruct the solution for n frames after init state
+
+            tds = da.stack(_tds, axis=1)
+            prediction = phi.dot(tds)
+
+            # save prediction
+            prediction_df = dd.from_dask_array(prediction)
+            prediction_df.columns = prediction_df.columns.astype(str)
+            prediction_df.to_parquet(
+                f"{path_dmd_values}/prediction",
+                compression="snappy",
+                write_metadata_file=True,
+            )
+
+        def viz_prediction(
+            self,
+            variables,
+            path_dmd=".dmd",
+            path_viz=".viz",
+            bounds="auto",
+            coordinates="2D",
+            dist=None,
+        ):
+            variables = variables if type(variables) is list else [variables]
+            for var in tqdm(variables, "predicting variables"):
+                utils.ensure_dir(f"{path_viz}/{var}/prediction/frames")
+                # load prediction_df
+                prediction_df = dd.read_parquet(
+                    f"{path_dmd_values}/prediction", engine="pyarrow"
+                )
+
+                self.make_dim(coordinates)
+
+                if self.dim == "xy":
+                    path_x = f"{path_dmd}/x.pkl"
+                    path_y = f"{path_dmd}/y.pkl"
+                    x = utils.loadit(path_x)
+                    y = utils.loadit(path_y)
+
+                    if bounds == "auto":
+                        bounds = self.make_bounds([x, y])
+
+                    if dist:
+                        dist_map = self.dist_map(x, y, bounds)
+
+                # visualize prediction snapshots
+                modelist = range(0, prediction.shape[1])
+                self.u_viz(
+                    x,
+                    y,
+                    dd.io.from_dask_array(prediction).compute(),
+                    f"{path_viz}/{var}/prediction/frames",
+                    modelist,
+                    bounds,
+                    dist,
+                    dist_map,
+                )
+                self.animate(
+                    Path.cwd() / f"{path_viz}/{var}/prediction/frames",
+                )
+
+    def animate(self, path_frames):
+        import imageio
+
+        with imageio.get_writer(
+            path_frames / "animation.mp4", quality=7, fps=10
+        ) as writer:
+            for png_file in sorted(path_frames.glob("*.png")):
+                image = imageio.imread(png_file)
+                writer.append_data(image)
+            writer.close()
+
+    def viz_eigs(self, variables, path_dmd=".dmd", path_viz=".viz", maxmode=None):
         variables = variables if type(variables) is list else [variables]
         import matplotlib.pyplot as plt
         import matplotlib.ticker as mtick
@@ -1769,7 +1889,10 @@ class DMD(POD):
         plt.rc("font", size=self.fontsize)
         for var in tqdm(variables, "plotting DMD modes eigenvalues"):
             utils.ensure_dir(f"{path_viz}/{var}")
-            eigs = utils.loadit(f"{path_dmd}/{var}/lambda.pkl")[:maxmode]
+            eigs = utils.loadit(f"{path_dmd}/{var}/lambda.pkl")
+            if maxmode is None:
+                maxmode = eigs.shape[0]
+            eigs = eigs[:maxmode]
 
             fig, ax = plt.subplots(1)
             fig.set_size_inches(self.width, self.height)
@@ -1894,53 +2017,6 @@ class DMD(POD):
                     bbox_inches="tight",
                 )
                 plt.close("all")
-
-    def predict(
-        self,
-        variables,
-        coordinates="2D",
-        path_parquet=".data",
-        path_dmd=".dmd",
-        path_viz=".viz",
-        start=0,
-        frames=10,
-        bounds="auto",
-        dist=None,
-    ):
-        variables = variables if type(variables) is list else [variables]
-        self.make_dim(coordinates)
-
-        if self.dim == "xy":
-            path_x = f"{path_dmd}/x.pkl"
-            path_y = f"{path_dmd}/y.pkl"
-            x = utils.loadit(path_x)
-            y = utils.loadit(path_y)
-
-            if bounds == "auto":
-                bounds = self.make_bounds([x, y])
-
-            if dist:
-                dist_map = self.dist_map(x, y, bounds)
-
-        for var in tqdm(variables, "predicting variables"):
-            utils.ensure_dir(f"{path_viz}/{var}/frames")
-            path_frames = Path.cwd() / f"{var}" / "frames"
-            path_dmd_values = Path.cwd() / path_dmd / f"{var}"
-
-            init = self.get_init(f"{path_parquet}/{var}")
-            init.compute_chunk_sizes()
-
-            Atilde = dd.read_parquet(path_dmd_values / "Atilde", engine="pyarrow")
-            b = utils.loadit(path_dmd_values / "b.pkl")
-            eigs = utils.loadit(path_dmd_values / "lambda.pkl")
-            omega = np.log(eigs) / self.dt
-            modes = dd.read_parquet(path_dmd_values / "modes", engine="pyarrow")
-            modes = modes.to_dask_array(lengths=True)
-
-            for frame in range(start, frames):
-                prediction = (
-                    modes.dot(np.real(eigs)).dot(np.linalg.pinv(modes)).dot(init)
-                )
 
     def mres_dmd(self):
         # Idea: apply DMD at multiple levels of coarse graining and somehow comnbine them into a unified representation
