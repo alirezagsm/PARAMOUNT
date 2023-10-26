@@ -4,6 +4,7 @@ from pathlib import Path
 import logging
 import numpy as np
 import pandas as pd
+from dask import delayed
 from dask.distributed import Client, LocalCluster
 import dask.dataframe as dd
 import dask.array as da
@@ -1460,13 +1461,15 @@ class POD(Base):
         xmin, xmax, ymin, ymax, res = bounds
         xx, yy = self.make_meshgrid(bounds)
 
-        for mode in tqdm(modelist, "plotting 2D mode shapes", leave=False):
+        # for mode in tqdm(modelist, "plotting 2D mode shapes", leave=False):
+        @delayed
+        def _plot(mode):
             if isinstance(u, dd.DataFrame):
                 uu = u.iloc[:, mode].compute()
             elif isinstance(u, pd.DataFrame):
                 uu = u.iloc[:, mode]
             else:
-                exception = "u must be a pandas or dask dataframe"
+                raise ("u must be a pandas or dask dataframe")
             kk = griddata(
                 (x, y),
                 uu,
@@ -1502,16 +1505,29 @@ class POD(Base):
                 cmap=self.cmap,
                 antialiased=True,
                 extend="both",
+                
+                
             )
             for c in contour.collections:
                 c.set_edgecolor("face")
             fig.tight_layout()
             for axis in ["top", "bottom", "left", "right"]:
                 ax.spines[axis].set_linewidth(self.ax_width)
-            plt.savefig(
-                f"{path_viz}/u{mode}" + ".png", dpi=self.dpi, bbox_inches="tight"
+            fig.savefig(
+                f"{path_viz}/u{mode}" + ".png",
+                dpi=self.dpi,
+                bbox_inches="tight",
             )
+
             plt.close("all")
+
+        tasks = []
+        for mode in tqdm(modelist, "plotting 2D mode shapes", leave=False):
+            tasks.append(_plot(mode))
+        import dask
+
+        num_threads = len(self.client.nthreads()) * 2
+        dask.compute(tasks, scheduler="threads", num_workers=num_threads)
 
     def v_viz(self, v, path_viz, modelist, freq_max):
         """
@@ -1802,76 +1818,91 @@ class DMD(POD):
             phi = phi.to_dask_array(lengths=True)
 
             _tds = []
+            prediction = []
             if frames is None:
                 frames = phi.shape[1]
             for frame in range(start, frames):
-                _tds.append(b * da.exp(np.real(omega) * (start + self.dt * frame)))
+                # _tds.append(b * da.exp(omega * (start + self.dt * frame)))
+                prediction.append(
+                    da.real(phi.dot(b * da.exp(omega * (start + self.dt * frame))))
+                )
             # reconstruct the solution for n frames after init state
 
-            tds = da.stack(_tds, axis=1)
-            prediction = phi.dot(tds)
+            # tds = da.stack(_tds, axis=1)
 
-            # save prediction
-            prediction_df = dd.from_dask_array(prediction)
+            # prediction = da.real(phi.dot(tds))
+
+            # save predictions
+            prediction_stack = da.stack(prediction, axis=1)
+            prediction_df = dd.from_dask_array(prediction_stack)
             prediction_df.columns = prediction_df.columns.astype(str)
+            prediction_df = prediction_df.repartition(
+                partition_size="150MB", force=True
+            )
             prediction_df.to_parquet(
                 f"{path_dmd_values}/prediction",
                 compression="snappy",
                 write_metadata_file=True,
             )
 
-        def viz_prediction(
-            self,
-            variables,
-            path_dmd=".dmd",
-            path_viz=".viz",
-            bounds="auto",
-            coordinates="2D",
-            dist=None,
-        ):
-            variables = variables if type(variables) is list else [variables]
-            for var in tqdm(variables, "predicting variables"):
-                utils.ensure_dir(f"{path_viz}/{var}/prediction/frames")
-                # load prediction_df
-                prediction_df = dd.read_parquet(
-                    f"{path_dmd_values}/prediction", engine="pyarrow"
-                )
+    def viz_prediction(
+        self,
+        variables,
+        frames=None,
+        path_dmd=".dmd",
+        path_viz=".viz",
+        bounds="auto",
+        coordinates="2D",
+        dist=None,
+    ):
+        variables = variables if type(variables) is list else [variables]
 
-                self.make_dim(coordinates)
+        for var in tqdm(variables, "predicting variables"):
+            utils.ensure_dir(f"{path_viz}/{var}/prediction/frames")
+            path_dmd_values = Path.cwd() / path_dmd / f"{var}"
+            # load prediction_df
+            prediction = dd.read_parquet(
+                f"{path_dmd_values}/prediction", engine="pyarrow"
+            )
 
-                if self.dim == "xy":
-                    path_x = f"{path_dmd}/x.pkl"
-                    path_y = f"{path_dmd}/y.pkl"
-                    x = utils.loadit(path_x)
-                    y = utils.loadit(path_y)
+            self.make_dim(coordinates)
 
-                    if bounds == "auto":
-                        bounds = self.make_bounds([x, y])
+            if self.dim == "xy":
+                path_x = f"{path_dmd}/x.pkl"
+                path_y = f"{path_dmd}/y.pkl"
+                x = utils.loadit(path_x)
+                y = utils.loadit(path_y)
 
-                    if dist:
-                        dist_map = self.dist_map(x, y, bounds)
+                if bounds == "auto":
+                    bounds = self.make_bounds([x, y])
 
-                # visualize prediction snapshots
+                if dist:
+                    dist_map = self.dist_map(x, y, bounds)
+
+            # visualize prediction snapshots
+            if frames is None:
                 modelist = range(0, prediction.shape[1])
-                self.u_viz(
-                    x,
-                    y,
-                    dd.io.from_dask_array(prediction).compute(),
-                    f"{path_viz}/{var}/prediction/frames",
-                    modelist,
-                    bounds,
-                    dist,
-                    dist_map,
-                )
-                self.animate(
-                    Path.cwd() / f"{path_viz}/{var}/prediction/frames",
-                )
+            else:
+                modelist = range(0, frames)
+            self.u_viz(
+                x,
+                y,
+                prediction.compute(),
+                f"{path_viz}/{var}/prediction/frames",
+                modelist,
+                bounds,
+                dist,
+                dist_map,
+            )
+            self.animate(
+                Path.cwd() / f"{path_viz}/{var}/prediction/frames",
+            )
 
     def animate(self, path_frames):
         import imageio
 
         with imageio.get_writer(
-            path_frames / "animation.mp4", quality=7, fps=10
+            path_frames / "animation.mp4", quality=9, fps=24
         ) as writer:
             for png_file in sorted(path_frames.glob("*.png")):
                 image = imageio.imread(png_file)
