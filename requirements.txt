@@ -10,3 +10,5 @@ ipywidgets
 matplotlib
 plotly
 kaleido  
+imageio[ffmpeg]
+bokeh
