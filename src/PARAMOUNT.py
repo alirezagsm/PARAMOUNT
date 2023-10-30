@@ -1436,7 +1436,9 @@ class POD(Base):
 
             display(savebutton, fig)
 
-    def u_viz(self, x, y, u, path_viz, modelist, bounds, dist, dist_map):
+    def u_viz(
+        self, x, y, u, path_viz, modelist, bounds, dist, dist_map, vmax=None, vmin=None
+    ):
         """
         u_viz 2D visualization of SVD mode shapes
 
@@ -1496,18 +1498,28 @@ class POD(Base):
             ax.set_axisbelow(True)
             ax.grid(alpha=0.5)
             kk[np.isnan(kk)] = np.min(abs(kk))
-
-            contour = ax.contourf(
-                xx,
-                yy,
-                kk,
-                self.contour_levels,
-                cmap=self.cmap,
-                antialiased=True,
-                extend="both",
-                
-                
-            )
+            if vmax is None:
+                contour = ax.contourf(
+                    xx,
+                    yy,
+                    kk,
+                    self.contour_levels,
+                    cmap=self.cmap,
+                    antialiased=True,
+                    extend="both",
+                )
+            else:
+                contour = ax.contourf(
+                    xx,
+                    yy,
+                    kk,
+                    self.contour_levels,
+                    cmap=self.cmap,
+                    antialiased=True,
+                    extend="both",
+                    vmax=vmax,
+                    vmin=vmin,
+                )
             for c in contour.collections:
                 c.set_edgecolor("face")
             fig.tight_layout()
@@ -1756,6 +1768,8 @@ class DMD(POD):
                     compression="snappy",
                     write_metadata_file=True,
                 )
+            # restart workers to prevent memory issues
+            self.client.restart_workers(workers=self.client.scheduler_info()["workers"])
             result = dd.from_array(s).compute()
             utils.saveit(result, f"{path_dmd}/{var}/s.pkl")
 
@@ -1854,6 +1868,8 @@ class DMD(POD):
         bounds="auto",
         coordinates="2D",
         dist=None,
+        vmax="auto",
+        vmin="auto",
     ):
         variables = variables if type(variables) is list else [variables]
 
@@ -1883,7 +1899,9 @@ class DMD(POD):
             if frames is None:
                 modelist = range(0, prediction.shape[1])
             else:
-                modelist = range(0, frames)
+                modelist = np.linspace(0, prediction.shape[1] - 1, frames).astype(int)
+            vmax = prediction.iloc[:, 0].max().compute() if vmax == "auto" else vmax
+            vmin = prediction.iloc[:, 0].min().compute() if vmin == "auto" else vmin
             self.u_viz(
                 x,
                 y,
@@ -1893,6 +1911,8 @@ class DMD(POD):
                 bounds,
                 dist,
                 dist_map,
+                vmax=vmax,
+                vmin=vmin,
             )
             self.animate(
                 Path.cwd() / f"{path_viz}/{var}/prediction/frames",
@@ -1901,10 +1921,18 @@ class DMD(POD):
     def animate(self, path_frames):
         import imageio
 
+        file_pattern = re.compile(r".*?(\d+).*?")
+
+        def get_order(file):
+            match = file_pattern.match(Path(file).name)
+            if not match:
+                return np.inf
+            return int(match.groups()[0])
+
         with imageio.get_writer(
             path_frames / "animation.mp4", quality=9, fps=24
         ) as writer:
-            for png_file in sorted(path_frames.glob("*.png")):
+            for png_file in sorted(path_frames.glob("*.png"), key=get_order):
                 image = imageio.imread(png_file)
                 writer.append_data(image)
             writer.close()
