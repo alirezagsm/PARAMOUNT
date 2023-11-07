@@ -13,7 +13,7 @@ from src.utils import utils
 from tqdm import tqdm
 
 # suppress dask user warnings
-logging.getLogger("distributed").setLevel(logging.CRITICAL)
+# logging.getLogger("distributed").setLevel(logging.CRITICAL)
 
 
 # logging.getLogger("distributed.utils_perf").setLevel(logging.CRITICAL)
@@ -36,7 +36,11 @@ class Base:
         Returns:
             tuple: cluster, client
         """
-        cluster = LocalCluster(dashboard_address="localhost:8000")
+
+        cluster = LocalCluster(
+            dashboard_address="localhost:8000",
+            silence_logs=logging.CRITICAL,
+        )
         client = Client(cluster)
 
         print(client.cluster)
@@ -1769,7 +1773,8 @@ class DMD(POD):
                     write_metadata_file=True,
                 )
             # restart workers to prevent memory issues
-            self.client.restart_workers(workers=self.client.scheduler_info()["workers"])
+            self.client.restart()
+            # self.client.restart_workers(workers=self.client.scheduler_info()["workers"])
             result = dd.from_array(s).compute()
             utils.saveit(result, f"{path_dmd}/{var}/s.pkl")
 
@@ -1937,7 +1942,9 @@ class DMD(POD):
                 writer.append_data(image)
             writer.close()
 
-    def viz_eigs(self, variables, path_dmd=".dmd", path_viz=".viz", maxmode=None):
+    def viz_eigs_circle(
+        self, variables, path_dmd=".dmd", path_viz=".viz", maxmode=None
+    ):
         variables = variables if type(variables) is list else [variables]
         import matplotlib.pyplot as plt
         import matplotlib.ticker as mtick
@@ -1946,6 +1953,7 @@ class DMD(POD):
         plt.switch_backend("agg")
         plt.rc("font", family=self.font)
         plt.rc("font", size=self.fontsize)
+        plt.rc('text', usetex=True)
         for var in tqdm(variables, "plotting DMD modes eigenvalues"):
             utils.ensure_dir(f"{path_viz}/{var}")
             eigs = utils.loadit(f"{path_dmd}/{var}/lambda.pkl")
@@ -1956,8 +1964,8 @@ class DMD(POD):
             fig, ax = plt.subplots(1)
             fig.set_size_inches(self.width, self.height)
             fig.patch.set_facecolor("w")
-            ax.set_xlabel("Real")
-            ax.set_ylabel("Imag")
+            ax.set_xlabel("$\\Re(\\lambda_i$)")
+            ax.set_ylabel("$\\Im(\\lambda_i$)")
             ax.set_axisbelow(True)
             ax.grid(alpha=0.5, which="both")
 
@@ -1969,8 +1977,9 @@ class DMD(POD):
             ax.scatter(
                 np.real(eigs),
                 np.imag(eigs),
-                s=60,
-                c=np.abs(eigs),
+                s=7,
+                # c=np.abs(eigs),
+                c="black",
                 edgecolors="none",
             )
 
@@ -1979,8 +1988,78 @@ class DMD(POD):
                 ax.spines[axis].set_linewidth(self.ax_width)
             for axis in ["top", "right"]:
                 ax.spines[axis].set_linewidth(0)
+            plt.show()
             plt.savefig(
-                f"{path_viz}/{var}/eigs" + ".png", dpi=self.dpi, bbox_inches="tight"
+                f"{path_viz}/{var}/eig_z" + ".png", dpi=self.dpi, bbox_inches="tight"
+            )
+            plt.close("all")
+
+    def viz_eigs_psd(
+        self, variables, path_dmd=".dmd", path_viz=".viz", maxmode=None, freq_max=3000
+    ):
+        variables = variables if type(variables) is list else [variables]
+        import matplotlib.pyplot as plt
+        import matplotlib.ticker as mtick
+        from matplotlib.colors import Normalize
+        import matplotlib.mlab as mlab
+        from scipy.signal import find_peaks
+
+        plt.switch_backend("agg")
+        plt.rc("font", family=self.font)
+        plt.rc("font", size=self.fontsize)
+        for var in tqdm(variables, "plotting DMD modes eigenvalues PSD"):
+            utils.ensure_dir(f"{path_viz}/{var}")
+            eigs = utils.loadit(f"{path_dmd}/{var}/lambda.pkl")
+            if maxmode is None:
+                maxmode = eigs.shape[0]
+            eigs = eigs[:maxmode]
+
+            fig, ax = plt.subplots(1)
+            fig.set_size_inches(self.width, self.height)
+            fig.patch.set_facecolor("w")
+            ax.set_xlabel("Frequency [Hz]")
+            ax.set_ylabel("Power Spectral Density [db/Hz]")
+            ax.grid(alpha=0.5)
+            ax.set_xlim(-freq_max, freq_max)
+
+            Pxx, freqs = mlab.psd(
+                eigs,
+                Fs=1 / self.dt,
+                window=mlab.window_hanning,
+                detrend="linear",
+            )
+            Pxx = Pxx[np.abs(freqs) <= freq_max]
+            freqs = freqs[np.abs(freqs) <= freq_max]
+            midpoint = len(Pxx) // 2
+            dbPxx = 10 * np.log10(Pxx)
+            peaks, _ = find_peaks(dbPxx[midpoint:], prominence=3)
+            ax.plot(freqs, dbPxx, self.color, linewidth=self.linewidth)
+            npeaks = 3
+            for n in range(0, min(npeaks, len(peaks))):
+                ax.scatter(
+                    freqs[midpoint + peaks[n]],
+                    dbPxx[midpoint + peaks[n]],
+                    s=80,
+                    facecolors="none",
+                    edgecolors="grey",
+                )
+                acc = 0
+                if freq_max < 10:
+                    acc = 2
+                ax.annotate(
+                    f"{freqs[midpoint+peaks[n]]:0.{acc}f}",
+                    xy=(
+                        freqs[midpoint + peaks[n]] + freq_max / 25,
+                        dbPxx[midpoint + peaks[n]] * 0.99,
+                    ),
+                )
+            fig.tight_layout()
+            for axis in ["bottom", "left"]:
+                ax.spines[axis].set_linewidth(self.ax_width)
+            for axis in ["top", "right"]:
+                ax.spines[axis].set_linewidth(0)
+            plt.savefig(
+                f"{path_viz}/{var}/eig_PSD" + ".png", dpi=self.dpi, bbox_inches="tight"
             )
             plt.close("all")
 
