@@ -565,17 +565,72 @@ class Base:
             dt (float): timestep
             t0 (float): initial time
         """
-        self.dt = dt
+        try:
+            self.data_skip
+        except:
+            self.data_skip = None
+
+        if self.data_skip is not None:
+            self.dt = dt * self.data_skip
+        else:
+            self.dt = dt
         self.t0 = t0
 
-    def set_skip(self, skip):
-        """
-        set_skip set skip for snapshots
+    def data_decimate(self, df, X1=False, X2=False):
+        try:
+            self.data_cutoff
+        except:
+            self.data_cutoff = None
 
-        Args:
-            skip (int): number of snapshots to skip
-        """
-        self.skip = skip
+        try:
+            self.data_cutin
+        except:
+            self.data_cutin = None
+
+        try:
+            self.data_skip
+        except:
+            self.data_skip = None
+
+        if self.data_cutoff is not None:
+            cutoff = int(df.shape[1] * self.data_cutoff / 100)
+            try:
+                df = df[:, :cutoff]
+            except:
+                df = df.iloc[:, :cutoff]
+
+        if self.data_cutin is not None:
+            cutin = int(df.shape[1] * self.data_cutin / 100)
+            try:
+                df = df[:, cutin:]
+            except:
+                df = df.iloc[:, cutin:]
+
+        if self.data_skip is not None:
+            df = df[:, :: self.data_skip]
+
+        if X1:
+            try:
+                df = df[:, :-1]
+            except:
+                df = df.iloc[:, :-1]
+
+        if X2:
+            try:
+                df = df[:, 1:]
+            except:
+                df = df.iloc[:, 1:]
+
+        return df
+
+    def set_data_cutin(self, data_cutin):
+        self.data_cutin = data_cutin
+
+    def set_data_cutoff(self, data_cutoff):
+        self.data_cutoff = data_cutoff
+
+    def set_data_skip(self, data_skip):
+        self.data_skip = data_skip
 
     def set_viz_params(
         self,
@@ -728,6 +783,7 @@ class POD(Base):
         variables,
         path_parquet=".data",
         path_pod=".usv",
+        dmd_flag=False,
     ):
         """
         svd_save_usv compute distributed Singular Value Decomposition and store results in parquet format.
@@ -765,9 +821,8 @@ class POD(Base):
             utils.ensure_dir(path)
 
             df = dd.read_parquet(path, engine="pyarrow")
-            # skip columns for every self.skip if set
-            if self.skip > 1:
-                df = df.iloc[:, :: self.skip]
+            df = self.data_decimate(df, X1=dmd_flag)
+
             u, s, v = da.linalg.svd(df.values)
 
             for name, item in zip(["u", "v"], [u, v]):
@@ -1541,9 +1596,11 @@ class POD(Base):
         for mode in tqdm(modelist, "plotting 2D mode shapes", leave=False):
             tasks.append(_plot(mode))
         import dask
+        from dask.diagnostics import ProgressBar
 
         num_threads = len(self.client.nthreads()) * 2
-        dask.compute(tasks, scheduler="threads", num_workers=num_threads)
+        with ProgressBar():
+            dask.compute(tasks, scheduler="threads", num_workers=num_threads)
 
     def v_viz(self, v, path_viz, modelist, freq_max):
         """
@@ -1720,14 +1777,18 @@ class POD(Base):
 
 
 class DMD(POD):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
     def save_Atilde(
         self,
         variables,
         path_parquet=".data",
+        path_pod=".usv",
         path_dmd=".dmd",
     ):
         """
-        save_Atilde compute Atilde, u and s matrices and save them in parquet or pickle format
+        save_Atilde compute Atilde matrix.
         """
         variables = variables if type(variables) is list else [variables]
         _v = variables.copy()
@@ -1752,64 +1813,96 @@ class DMD(POD):
         for var in tqdm(variables, "computing Atilde matrix"):
             path_var = Path.cwd() / path_parquet / f"{var}"
             df = dd.read_parquet(path_var, engine="pyarrow").to_dask_array()
-            if self.skip > 1:
-                df = df[:, :: self.skip]
-            df1 = df[:, :-1]
-            df2 = df[:, 1:]
-            u, s, v = da.linalg.svd(df1)
-            Atilde = u.transpose().conj().dot(df2).dot(
-                v.transpose().conj()
-            ) * np.reciprocal(s)
 
-            for name, item in zip(["u", "Atilde"], [u, Atilde]):
-                # if np.isnan(item.shape[0]):
-                #     item = item.compute()
-                result = dd.from_array(item)
-                result.columns = result.columns.astype(str)
-                dd.to_parquet(
-                    result,
-                    f"{path_dmd}/{var}/{name}",
-                    compression="snappy",
-                    write_metadata_file=True,
-                )
-            # restart workers to prevent memory issues
-            self.client.restart()
-            # self.client.restart_workers(workers=self.client.scheduler_info()["workers"])
-            result = dd.from_array(s).compute()
-            utils.saveit(result, f"{path_dmd}/{var}/s.pkl")
+            # df = df[:, :: self.skip]
+            # # df1 = df[:, :-1]
+            # df2 = df[:, 1:]
+            df2 = self.data_decimate(df, X2=True)
+            df2.compute_chunk_sizes()
+            # load in u, s and v from path_pod
+            path_u = Path.cwd() / path_pod / f"{var}" / "u"
+            path_s = Path.cwd() / path_pod / f"{var}" / "s.pkl"
+            path_v = Path.cwd() / path_pod / f"{var}" / "v"
+            u = dd.read_parquet(path_u, engine="pyarrow")
+            s = utils.loadit(path_s)
+            v = dd.read_parquet(path_v, engine="pyarrow")
+            u = u.to_dask_array()
+            u.compute_chunk_sizes()
+            v = v.to_dask_array()
+            v.compute_chunk_sizes()
+            # Atilde = (
+            #     u.transpose() @ df2 @ v @ np.diag(s**-1)
+            # )
+            Atilde = da.matmul(
+                da.matmul(da.matmul(u.transpose(), df2), v.transpose()),
+                da.diag(s.values**-1),
+            )
+            utils.saveit(Atilde.compute(), f"{path_dmd}/{var}/Atilde.pkl")
 
     def get_init(self, path, index=0):
         df = dd.read_parquet(path, engine="pyarrow").to_dask_array()
         return df.T[index]
 
-    def save_modes(self, variables, path_parquet=".data", path_dmd=".dmd"):
+    def save_modes(
+        self,
+        variables,
+        path_parquet=".data",
+        path_dmd=".dmd",
+        path_pod=".usv",
+        projection_method=True,
+    ):
         variables = variables if type(variables) is list else [variables]
         for var in tqdm(variables, "computing DMD modes and coefficients"):
-            path_Atilde = Path.cwd() / path_dmd / f"{var}" / "Atilde"
-            path_u = Path.cwd() / path_dmd / f"{var}" / "u"
-            Atilde = dd.read_parquet(path_Atilde, engine="pyarrow")
+            path_Atilde = Path.cwd() / path_dmd / f"{var}" / "Atilde.pkl"
+            Atilde = utils.loadit(path_Atilde)
             Lambda, eigvecs = np.linalg.eig(Atilde)
+            path_u = Path.cwd() / path_pod / f"{var}" / "u"
+            path_v = Path.cwd() / path_pod / f"{var}" / "v"
             u = dd.read_parquet(path_u, engine="pyarrow")
-            # compute the projected DMD modes
-            phi = u.to_dask_array(lengths=True).dot(np.real(eigvecs))
-            phi_pq = phi.to_dask_dataframe(
-                columns=u.columns,
-            )
-            phi_pq.columns = phi_pq.columns.astype(str)
-            # for now pyarrow does not support complex128 dtype
-            # utils.saveit(Modes2.compute(), f"{path_dmd}/{var}/modes.pkl")
+            columns = u.columns
+            v = dd.read_parquet(path_v, engine="pyarrow")
+            u = u.to_dask_array()
+            u.compute_chunk_sizes()
+            v = v.to_dask_array()
+            v.compute_chunk_sizes()
+
+            path_var = Path.cwd() / path_parquet / f"{var}"
+            df = dd.read_parquet(path_var, engine="pyarrow").to_dask_array()
+
+            # Two methods to compute phi
+            if projection_method:
+                phi = da.matmul(u, eigvecs)
+            else:
+                df2 = self.data_decimate(df, X2=True)
+                path_s = Path.cwd() / path_pod / f"{var}" / "s.pkl"
+                s = utils.loadit(path_s)
+                phi = da.matmul(
+                    da.matmul(da.matmul(df2, v.transpose()), da.diag(s.values**-1)),
+                    eigvecs,
+                )
+
+            # Convert the complex numbers to real and imaginary parts
+            phi_real = phi.real.to_dask_dataframe(columns=columns)
+            phi_imag = phi.imag.to_dask_dataframe(columns=columns)
+
+            # Write the real and imaginary parts to separate Parquet files
             dd.to_parquet(
-                phi_pq,
-                f"{path_dmd}/{var}/modes",
+                phi_real,
+                f"{path_dmd}/{var}/modes_real",
                 compression="snappy",
                 write_metadata_file=True,
             )
-            init = self.get_init(f"{path_parquet}/{var}")
-            # init.compute_chunk_sizes()
-            # Moore–Penrose pseudoinverse
-            # The pseudoinverse is equivalent to finding the best-fit solution b in the least-squares sense.
-            # b = da.linalg.lstsq(phi, init)[0]
-            b = np.linalg.pinv(phi).dot(init)
+            dd.to_parquet(
+                phi_imag,
+                f"{path_dmd}/{var}/modes_imag",
+                compression="snappy",
+                write_metadata_file=True,
+            )
+
+            # df.compute_chunk_sizes()
+            init = df[:, 0].compute()
+            # b = np.linalg.pinv(phi) @ init
+            b = np.linalg.lstsq(phi.compute(), init, rcond=None)[0]
             utils.saveit(b, f"{path_dmd}/{var}/b.pkl")
             utils.saveit(Lambda, f"{path_dmd}/{var}/lambda.pkl")
 
@@ -1817,8 +1910,8 @@ class DMD(POD):
         self,
         variables,
         path_dmd=".dmd",
-        start=0,
-        frames=None,
+        end=None,
+        frame_skip=1,
     ):
         variables = variables if type(variables) is list else [variables]
 
@@ -1833,42 +1926,149 @@ class DMD(POD):
             b = utils.loadit(path_dmd_values / "b.pkl")
             eigs = utils.loadit(path_dmd_values / "lambda.pkl")
             omega = np.log(eigs) / self.dt
-            phi = dd.read_parquet(path_dmd_values / "modes", engine="pyarrow")
+            # Read the real and imaginary parts from the Parquet files
+            phi_real = dd.read_parquet(f"{path_dmd}/{var}/modes_real")
+            phi_imag = dd.read_parquet(f"{path_dmd}/{var}/modes_imag")
+
+            # Combine the real and imaginary parts to form complex numbers
+            phi = phi_real + 1j * phi_imag
+            # phi = dd.read_parquet(path_dmd_values / "modes", engine="pyarrow")
             phi = phi.to_dask_array(lengths=True)
 
-            _tds = []
-            prediction = []
-            if frames is None:
-                frames = phi.shape[1]
-            for frame in range(start, frames):
-                # _tds.append(b * da.exp(omega * (start + self.dt * frame)))
-                prediction.append(
-                    da.real(phi.dot(b * da.exp(omega * (start + self.dt * frame))))
-                )
-            # reconstruct the solution for n frames after init state
+            # dynamics = []
+            if end is None:
+                end = phi.shape[1]
+            # for frame in range(start, end, frame_skip):
+            #     # prediction_list.append(
+            #     #     # da.real(phi.dot(b * da.exp(omega * (start + self.dt * frame))))
+            #     #     da.matmul(phi, b * da.exp(omega * (start + self.dt * frame))).real
+            #     # )
+            #     td = b * np.exp(omega * (start + self.dt * frame))
+            #     dynamics.append(td)
 
-            # tds = da.stack(_tds, axis=1)
+            # # save dynamics into a dataframe
+            time = np.arange(0, end, frame_skip) * self.dt
+            dynamics = np.zeros((len(b), len(time)), dtype=complex)
+            for i, t in enumerate(time):
+                dynamics[:, i] = b * np.exp(omega * t)
 
-            # prediction = da.real(phi.dot(tds))
-
-            # save predictions
-            prediction_stack = da.stack(prediction, axis=1)
-            prediction_df = dd.from_dask_array(prediction_stack)
+            prediction_da = da.matmul(phi, dynamics).real
+            prediction_df = dd.from_dask_array(prediction_da)
             prediction_df.columns = prediction_df.columns.astype(str)
-            prediction_df = prediction_df.repartition(
-                partition_size="150MB", force=True
-            )
+            prediction_df.repartition(npartitions=20)
             prediction_df.to_parquet(
                 f"{path_dmd_values}/prediction",
                 compression="snappy",
                 write_metadata_file=True,
             )
 
-    def viz_prediction(
+    def describe_parquet(
+        self, variables, path_data=".data", folder_name="", folder_name2=None
+    ):
+        variables = variables if type(variables) is list else [variables]
+        for var in tqdm(variables, "describing variables"):
+            df = dd.read_parquet(f"{path_data}/{var}/{folder_name}", engine="pyarrow")
+
+            if folder_name2 is not None:
+                df2 = dd.read_parquet(
+                    f"{path_data}/{var}/{folder_name2}", engine="pyarrow"
+                )
+                df = df - df2
+            df = df.compute()
+
+            def remove_outliers(df):
+                df = df.transpose()
+                mask = pd.Series(data=True, index=df.index)
+                for index in df.index:
+                    Q1 = df.loc[index].quantile(0.25)
+                    Q3 = df.loc[index].quantile(0.75)
+                    IQR = Q3 - Q1
+                    lower_bound = Q1 - 1.5 * IQR
+                    upper_bound = Q3 + 1.5 * IQR
+                    mask = (df.loc[index] < lower_bound) | (df.loc[index] > upper_bound)
+                    df.loc[index][mask] = np.nan
+                df = df.transpose()
+                return df
+
+            # print(df.mean(axis=1).describe())
+            df = remove_outliers(df)
+            print(df.mean(axis=1).describe())
+
+    def viz_error(
+        self, variables, path_data=".data1", path_dmd=".data2", path_viz=".viz"
+    ):
+        variables = variables if type(variables) is list else [variables]
+        for var in tqdm(variables, "prediction error calculation"):
+            utils.ensure_dir(f"{path_viz}/{var}")
+            path_pq1 = Path.cwd() / path_data / f"{var}"
+            path_pq2 = Path.cwd() / path_dmd / f"{var}" / "prediction"
+            df1 = dd.read_parquet(path_pq1, engine="pyarrow")
+            df2 = dd.read_parquet(path_pq2, engine="pyarrow")
+            df1 = df1.to_dask_array()
+            df2 = df2.to_dask_array()
+            # Root Mean Square Error (RMSE)
+            # rmse = da.mean((df1 - df2) ** 2, axis=0).compute()**0.5
+
+            # # Mean Squared Logarithmic Error (MSLE)
+            # msle = da.mean((da.log(df1 + 3e5) - da.log(df2 + 3e5)) ** 2, axis=0).compute()
+
+            # # Mean Absolute Percentage Error (MAPE)
+            # mape = da.mean(da.abs((df1 - df2) / df1), axis=0).compute() * 100
+
+            # Mean Absolute Error (MAE)
+            mae = da.mean(da.abs(df1 - df2), axis=0).compute()
+            error = mae
+
+            import matplotlib.pyplot as plt
+            import matplotlib.ticker as mtick
+
+            plt.rc("font", family=self.font)
+            plt.rc("font", size=self.fontsize)
+            fig, ax = plt.subplots(1)
+            fig.set_size_inches(self.width, self.height)
+            fig.patch.set_facecolor("w")
+            ax.set_xlabel("snapshots")
+            ax.set_ylabel("MAE")
+            ax.set_yscale("log")
+            # ax.yaxis.set_major_formatter(mtick.PercentFormatter())
+            ax.set_axisbelow(True)
+            ax.grid(alpha=0.5, which="both")
+
+            # ax.set_ylim(
+            #     rmse.min() - 10, rmse[int(self.data_cutoff * rmse.shape[0] / 100)] + 40
+            # )
+            # ax.set_ylim(
+            #     -2,2
+            # )
+            ax.set_xlim(1, error.shape[0])
+            ax.axvline(
+                self.data_cutoff * error.shape[0] / 100,
+                color="grey",
+                linestyle="--",
+                linewidth=1,
+            )
+            ax.plot(
+                error[1:],
+                self.color,
+                linewidth=self.linewidth,
+            )
+            fig.tight_layout()
+            for axis in ["bottom", "left"]:
+                ax.spines[axis].set_linewidth(self.ax_width)
+            for axis in ["top", "right"]:
+                ax.spines[axis].set_linewidth(0)
+            plt.savefig(
+                f"{path_viz}/{var}/mae" + ".png", dpi=self.dpi, bbox_inches="tight"
+            )
+            plt.close("all")
+
+    def viz_parquet(
         self,
         variables,
-        frames=None,
-        path_dmd=".dmd",
+        num_frames=None,
+        path_data=".dmd",
+        folder_name="",
+        folder_name2=None,
         path_viz=".viz",
         bounds="auto",
         coordinates="2D",
@@ -1879,18 +2079,24 @@ class DMD(POD):
         variables = variables if type(variables) is list else [variables]
 
         for var in tqdm(variables, "predicting variables"):
-            utils.ensure_dir(f"{path_viz}/{var}/prediction/frames")
-            path_dmd_values = Path.cwd() / path_dmd / f"{var}"
+            if var in self.get_folderlist(Path.cwd() / path_viz, boolPrint=False):
+                choice = input(
+                    f"{var.strip()} folder already exists! overwrite existing files? [y/n] "
+                )
+                if choice.lower().strip() == "y":
+                    shutil.rmtree(f"{path_viz}/{var}")
+            utils.ensure_dir(f"{path_viz}/{var}")
             # load prediction_df
+            path_dmd_values = Path.cwd() / path_data / f"{var}"
             prediction = dd.read_parquet(
-                f"{path_dmd_values}/prediction", engine="pyarrow"
+                f"{path_dmd_values}/{folder_name}", engine="pyarrow"
             )
 
             self.make_dim(coordinates)
 
             if self.dim == "xy":
-                path_x = f"{path_dmd}/x.pkl"
-                path_y = f"{path_dmd}/y.pkl"
+                path_x = f"{path_data}/x.pkl"
+                path_y = f"{path_data}/y.pkl"
                 x = utils.loadit(path_x)
                 y = utils.loadit(path_y)
 
@@ -1900,18 +2106,26 @@ class DMD(POD):
                 if dist:
                     dist_map = self.dist_map(x, y, bounds)
 
+            if folder_name2 is not None:
+                prediction2 = dd.read_parquet(
+                    f"{path_dmd_values}/{folder_name2}", engine="pyarrow"
+                )
+                prediction = prediction - prediction2
+
             # visualize prediction snapshots
-            if frames is None:
+            if num_frames is None:
                 modelist = range(0, prediction.shape[1])
             else:
-                modelist = np.linspace(0, prediction.shape[1] - 1, frames).astype(int)
+                modelist = np.linspace(0, prediction.shape[1] - 1, num_frames).astype(
+                    int
+                )
             vmax = prediction.iloc[:, 0].max().compute() if vmax == "auto" else vmax
             vmin = prediction.iloc[:, 0].min().compute() if vmin == "auto" else vmin
             self.u_viz(
                 x,
                 y,
                 prediction.compute(),
-                f"{path_viz}/{var}/prediction/frames",
+                f"{path_viz}/{var}",
                 modelist,
                 bounds,
                 dist,
@@ -1920,7 +2134,7 @@ class DMD(POD):
                 vmin=vmin,
             )
             self.animate(
-                Path.cwd() / f"{path_viz}/{var}/prediction/frames",
+                Path.cwd() / f"{path_viz}/{var}",
             )
 
     def animate(self, path_frames):
@@ -1953,7 +2167,7 @@ class DMD(POD):
         plt.switch_backend("agg")
         plt.rc("font", family=self.font)
         plt.rc("font", size=self.fontsize)
-        plt.rc('text', usetex=True)
+        plt.rc("text", usetex=True)
         for var in tqdm(variables, "plotting DMD modes eigenvalues"):
             utils.ensure_dir(f"{path_viz}/{var}")
             eigs = utils.loadit(f"{path_dmd}/{var}/lambda.pkl")
@@ -2010,9 +2224,6 @@ class DMD(POD):
         for var in tqdm(variables, "plotting DMD modes eigenvalues PSD"):
             utils.ensure_dir(f"{path_viz}/{var}")
             eigs = utils.loadit(f"{path_dmd}/{var}/lambda.pkl")
-            if maxmode is None:
-                maxmode = eigs.shape[0]
-            eigs = eigs[:maxmode]
 
             fig, ax = plt.subplots(1)
             fig.set_size_inches(self.width, self.height)
@@ -2106,7 +2317,9 @@ class DMD(POD):
             xx, yy = self.make_meshgrid(bounds)
 
             for mode in tqdm(modelist, "plotting 2D mode shapes", leave=False):
-                dmd_mode = dd.read_parquet(f"{path_dmd}/{var}/modes", engine="pyarrow")
+                dmd_mode = dd.read_parquet(
+                    f"{path_dmd}/{var}/modes_real", engine="pyarrow"
+                )
                 dm = dmd_mode.iloc[:, mode].compute()
                 kk = griddata(
                     (x, y),
@@ -2156,7 +2369,16 @@ class DMD(POD):
                 )
                 plt.close("all")
 
-    def mres_dmd(self):
+    def mres_dmd(self, varaibles, path_data='.data', cycles = 1, levels=2):
         # Idea: apply DMD at multiple levels of coarse graining and somehow comnbine them into a unified representation
         # This makes it possible to gain insight into the dynamics at different scales and how they influence each other
+        # calculate the multiresolution DMD as described in xdmd/mrdmd.py
+        variables = variables if type(variables) is list else [variables]
+             
+        for var in tqdm(variables, "computing mrDMD modes and coefficients"):
+            path_var = Path.cwd() / path_data / f"{var}"
+            df = dd.read_parquet(f"{path_data}/{var}", engine="pyarrow")
+            for level in levels:
+                n = 2**level
+
         pass
