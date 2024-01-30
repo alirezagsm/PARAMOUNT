@@ -784,6 +784,7 @@ class POD(Base):
         path_parquet=".data",
         path_pod=".usv",
         dmd_flag=False,
+        in_memory_df=None,
     ):
         """
         svd_save_usv compute distributed Singular Value Decomposition and store results in parquet format.
@@ -798,15 +799,16 @@ class POD(Base):
         """
         variables = variables if type(variables) is list else [variables]
         v_ = variables.copy()
-        for var in variables:
-            if var in self.get_folderlist(path=path_pod, boolPrint=False):
-                choice = input(
-                    f"{var.strip()} folder already exists! overwrite existing files? [y/n] "
-                )
-                if choice.lower().strip() == "y":
-                    shutil.rmtree(Path.cwd() / path_pod / var)
-                else:
-                    v_.remove(var)
+        if in_memory_df is None:
+            for var in variables:
+                if var in self.get_folderlist(path=path_pod, boolPrint=False):
+                    choice = input(
+                        f"{var.strip()} folder already exists! overwrite existing files? [y/n] "
+                    )
+                    if choice.lower().strip() == "y":
+                        shutil.rmtree(Path.cwd() / path_pod / var)
+                    else:
+                        v_.remove(var)
         variables = v_
 
         try:
@@ -818,11 +820,12 @@ class POD(Base):
 
         for var in tqdm(variables, "computing SVD modes"):
             path = Path.cwd() / path_parquet / f"{var}"
-            utils.ensure_dir(path)
-
-            df = dd.read_parquet(path, engine="pyarrow")
+            # utils.ensure_dir(path)
+            if in_memory_df is None:
+                df = dd.read_parquet(path, engine="pyarrow")
+            else:
+                df = in_memory_df
             df = self.data_decimate(df, X1=dmd_flag)
-
             u, s, v = da.linalg.svd(df.values)
 
             for name, item in zip(["u", "v"], [u, v]):
@@ -1780,27 +1783,60 @@ class DMD(POD):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
+    def stack(self, variables, path_parquet=".data",stack_idx=None):
+        variables = variables if type(variables) is list else [variables]
+        if len(variables) == 1:
+            print("only one variable found, no stacking required")
+            return
+        if stack_idx is not None:
+            vars = [variables[i] for i in stack_idx]
+        path_var0 = Path.cwd() / path_parquet / f"{vars[0]}"
+        df = dd.read_parquet(path_var0, engine="pyarrow")
+        for var in vars[1:]:
+            path_var = Path.cwd() / path_parquet / f"{var}"
+            df2 = dd.read_parquet(path_var, engine="pyarrow")
+            df = dd.concat([df, df2], axis=0)
+        stack_name = ""
+        for var in vars:
+            length = 2
+            while True:
+                truncated_names = [v[:length] for v in variables if v != var]
+                if var[:length] not in truncated_names:
+                    stack_name += "_"
+                    stack_name += var[:length]
+                    break
+                length += 1
+        df.to_parquet(
+            f"{path_parquet}/{len(vars)}{stack_name}",
+            compression="snappy",
+            write_metadata_file=True,
+        )
+        
+
     def save_Atilde(
         self,
         variables,
         path_parquet=".data",
         path_pod=".usv",
         path_dmd=".dmd",
+        in_memory_df=None,
     ):
         """
         save_Atilde compute Atilde matrix.
         """
         variables = variables if type(variables) is list else [variables]
         _v = variables.copy()
-        for var in variables:
-            if var in self.get_folderlist(path=path_dmd, boolPrint=False):
-                choice = input(
-                    f"{var.strip()} folder already exists! overwrite existing files? [y/n] "
-                )
-                if choice.lower().strip() == "y":
-                    shutil.rmtree(Path.cwd() / path_dmd / var)
-                else:
-                    _v.remove(var)
+
+        if in_memory_df is None:
+            for var in variables:
+                if var in self.get_folderlist(path=path_dmd, boolPrint=False):
+                    choice = input(
+                        f"{var.strip()} folder already exists! overwrite existing files? [y/n] "
+                    )
+                    if choice.lower().strip() == "y":
+                        shutil.rmtree(Path.cwd() / path_dmd / var)
+                    else:
+                        _v.remove(var)
         variables = _v
 
         try:
@@ -1812,7 +1848,10 @@ class DMD(POD):
 
         for var in tqdm(variables, "computing Atilde matrix"):
             path_var = Path.cwd() / path_parquet / f"{var}"
-            df = dd.read_parquet(path_var, engine="pyarrow").to_dask_array()
+            if in_memory_df is None:
+                df = df = dd.read_parquet(path_var, engine="pyarrow").to_dask_array()
+            else:
+                df = in_memory_df
 
             # df = df[:, :: self.skip]
             # # df1 = df[:, :-1]
@@ -1850,8 +1889,10 @@ class DMD(POD):
         path_dmd=".dmd",
         path_pod=".usv",
         projection_method=True,
+        in_memory_df=None,
     ):
         variables = variables if type(variables) is list else [variables]
+
         for var in tqdm(variables, "computing DMD modes and coefficients"):
             path_Atilde = Path.cwd() / path_dmd / f"{var}" / "Atilde.pkl"
             Atilde = utils.loadit(path_Atilde)
@@ -1867,7 +1908,11 @@ class DMD(POD):
             v.compute_chunk_sizes()
 
             path_var = Path.cwd() / path_parquet / f"{var}"
-            df = dd.read_parquet(path_var, engine="pyarrow").to_dask_array()
+
+            if in_memory_df is None:
+                df = dd.read_parquet(path_var, engine="pyarrow").to_dask_array()
+            else:
+                df = in_memory_df
 
             # Two methods to compute phi
             if projection_method:
@@ -2004,8 +2049,15 @@ class DMD(POD):
             path_pq2 = Path.cwd() / path_dmd / f"{var}" / "prediction"
             df1 = dd.read_parquet(path_pq1, engine="pyarrow")
             df2 = dd.read_parquet(path_pq2, engine="pyarrow")
+
+            # get minimum columns of the two dataframes
+            min_cols = min(df1.shape[1], df2.shape[1])
+            df1 = df1.iloc[:, :min_cols]
+            df2 = df2.iloc[:, :min_cols]
+
             df1 = df1.to_dask_array()
             df2 = df2.to_dask_array()
+            # make df2 same shape as df1
             # Root Mean Square Error (RMSE)
             # rmse = da.mean((df1 - df2) ** 2, axis=0).compute()**0.5
 
@@ -2208,7 +2260,7 @@ class DMD(POD):
             )
             plt.close("all")
 
-    def viz_eigs_psd(
+    def viz_eigs_spectrum(
         self, variables, path_dmd=".dmd", path_viz=".viz", maxmode=None, freq_max=3000
     ):
         variables = variables if type(variables) is list else [variables]
@@ -2224,32 +2276,34 @@ class DMD(POD):
         for var in tqdm(variables, "plotting DMD modes eigenvalues PSD"):
             utils.ensure_dir(f"{path_viz}/{var}")
             eigs = utils.loadit(f"{path_dmd}/{var}/lambda.pkl")
+            b = utils.loadit(f"{path_dmd}/{var}/b.pkl")
+            
+
 
             fig, ax = plt.subplots(1)
             fig.set_size_inches(self.width, self.height)
             fig.patch.set_facecolor("w")
             ax.set_xlabel("Frequency [Hz]")
-            ax.set_ylabel("Power Spectral Density [db/Hz]")
+            ax.set_ylabel("Power Spectral Density [|b|/Hz]")
             ax.grid(alpha=0.5)
-            ax.set_xlim(-freq_max, freq_max)
+            ax.set_xlim(0, freq_max)
 
-            Pxx, freqs = mlab.psd(
-                eigs,
-                Fs=1 / self.dt,
-                window=mlab.window_hanning,
-                detrend="linear",
-            )
-            Pxx = Pxx[np.abs(freqs) <= freq_max]
-            freqs = freqs[np.abs(freqs) <= freq_max]
-            midpoint = len(Pxx) // 2
+            freqs = np.abs(np.imag(np.log(eigs)/self.dt/2/np.pi))
+            idx = np.argsort(freqs)
+            Pxx = np.abs(b)[idx]
+            freqs = freqs[idx]
+            Pxx[0] = 0
+            Pxx[1] = 0
+            Pxx = Pxx[freqs < freq_max]
+            freqs = freqs[freqs < freq_max]
             dbPxx = 10 * np.log10(Pxx)
-            peaks, _ = find_peaks(dbPxx[midpoint:], prominence=3)
-            ax.plot(freqs, dbPxx, self.color, linewidth=self.linewidth)
-            npeaks = 3
+            peaks, _ = find_peaks(Pxx, prominence=3, distance=50)
+            ax.plot(freqs, Pxx, self.color, linewidth=self.linewidth)
+            npeaks = 4
             for n in range(0, min(npeaks, len(peaks))):
                 ax.scatter(
-                    freqs[midpoint + peaks[n]],
-                    dbPxx[midpoint + peaks[n]],
+                    freqs[peaks[n]],
+                    Pxx[peaks[n]],
                     s=80,
                     facecolors="none",
                     edgecolors="grey",
@@ -2258,10 +2312,10 @@ class DMD(POD):
                 if freq_max < 10:
                     acc = 2
                 ax.annotate(
-                    f"{freqs[midpoint+peaks[n]]:0.{acc}f}",
+                    f"{freqs[peaks[n]]:0.{acc}f}",
                     xy=(
-                        freqs[midpoint + peaks[n]] + freq_max / 25,
-                        dbPxx[midpoint + peaks[n]] * 0.99,
+                        freqs[peaks[n]] + freq_max / 25,
+                        Pxx[peaks[n]] * 0.99,
                     ),
                 )
             fig.tight_layout()
@@ -2283,6 +2337,7 @@ class DMD(POD):
         path_viz=".viz",
         bounds="auto",
         dist=False,
+        frequency=None,
     ):
         variables = variables if type(variables) is list else [variables]
         modelist = modelist if type(modelist) is list else list(modelist)
@@ -2292,7 +2347,11 @@ class DMD(POD):
         for var in tqdm(variables, "analyzing variables"):
             utils.ensure_dir(f"{path_viz}/{var}")
 
-            path_modes = Path.cwd() / f"{var}" / "modes"
+            if frequency is not None:
+                eigs = utils.loadit(f"{path_dmd}/{var}/lambda.pkl")
+                omega = np.log(eigs) / self.dt
+                idx = (np.abs(np.abs(omega) - 2 * np.pi * frequency)).argmin()
+                modelist = [idx]
 
             if self.dim == "xy":
                 path_x = f"{path_dmd}/x.pkl"
@@ -2369,16 +2428,186 @@ class DMD(POD):
                 )
                 plt.close("all")
 
-    def mres_dmd(self, varaibles, path_data='.data', cycles = 1, levels=2):
-        # Idea: apply DMD at multiple levels of coarse graining and somehow comnbine them into a unified representation
-        # This makes it possible to gain insight into the dynamics at different scales and how they influence each other
-        # calculate the multiresolution DMD as described in xdmd/mrdmd.py
+    def multires(
+        self, variables, path_parquet=".data", path_mrdmd=".mrdmd", levels=4, end=None
+    ):
         variables = variables if type(variables) is list else [variables]
-             
-        for var in tqdm(variables, "computing mrDMD modes and coefficients"):
-            path_var = Path.cwd() / path_data / f"{var}"
-            df = dd.read_parquet(f"{path_data}/{var}", engine="pyarrow")
-            for level in levels:
-                n = 2**level
+        path_mrdmd = Path.cwd() / path_mrdmd
 
-        pass
+        for var in tqdm(variables, "computing mrDMD modes and coefficients"):
+            for level in range(levels):
+                for i in range(2**level):
+                    utils.ensure_dir(path_mrdmd / f"level_{level}/{i}")
+            df = dd.read_parquet(f"{path_parquet}/{var}", engine="pyarrow")
+            df = df.iloc[:, : end - end % 2**levels]
+            if end is None:
+                end = df.shape[1].compute()
+            for level in range(0, levels):
+                if level > 0:
+                    df = dd.read_parquet(
+                        path_mrdmd / f"level_{level-1}/{var}/level_prediction",
+                        engine="pyarrow",
+                    )
+                slice_size = df.shape[1] // 2**level
+                dfs = [
+                    df.iloc[:, i * slice_size : (i + 1) * slice_size]
+                    for i in range(2**level)
+                ]
+                time = np.arange(0, end, 1) * self.dt
+                for i in range(0, 2**level):
+                    df_i = dfs[i]
+                    path_pod = path_mrdmd / f"level_{level}/{i}"
+                    path_dmd = path_mrdmd / f"level_{level}/{i}"
+                    self.svd_save_usv(
+                        variables,
+                        path_parquet=path_parquet,
+                        path_pod=path_pod,
+                        dmd_flag=True,
+                        in_memory_df=df_i,
+                    )
+                    self.save_Atilde(
+                        variables,
+                        path_parquet=path_parquet,
+                        path_pod=path_pod,
+                        path_dmd=path_dmd,
+                        in_memory_df=df_i.to_dask_array(lengths=True),
+                    )
+                    self.save_modes(
+                        variables,
+                        path_parquet=path_parquet,
+                        path_dmd=path_dmd,
+                        path_pod=path_pod,
+                        projection_method=True,
+                        in_memory_df=df_i.to_dask_array(lengths=True),
+                    )
+                    eigs = utils.loadit(path_dmd / f"{var}/lambda.pkl")
+                    omega = np.log(eigs) / self.dt
+                    rho = 1 / (self.dt * slice_size)
+                    slow_mask = np.where(np.abs(omega) < rho * 2 * np.pi)[0]
+                    b = utils.loadit(path_dmd / f"{var}/b.pkl")
+                    utils.saveit(b[slow_mask], f"{path_dmd}/{var}/b.pkl")
+                    utils.saveit(eigs[slow_mask], f"{path_dmd}/{var}/lambda.pkl")
+                    phi_real = dd.read_parquet(
+                        path_dmd / f"{var}/modes_real", engine="pyarrow"
+                    )
+                    phi_imag = dd.read_parquet(
+                        path_dmd / f"{var}/modes_imag", engine="pyarrow"
+                    )
+                    phi_real = phi_real.iloc[:, slow_mask]
+                    phi_imag = phi_imag.iloc[:, slow_mask]
+                    phi_real = phi_real.reset_index(drop=True)
+                    phi_imag = phi_imag.reset_index(drop=True)
+                    phi_real.to_parquet(
+                        path_dmd / f"{var}/modes_real_2", compression="snappy"
+                    )
+                    phi_imag.to_parquet(
+                        path_dmd / f"{var}/modes_imag_2", compression="snappy"
+                    )
+                    shutil.rmtree(path_dmd / f"{var}/modes_real")
+                    shutil.rmtree(path_dmd / f"{var}/modes_imag")
+                    shutil.move(
+                        path_dmd / f"{var}/modes_real_2",
+                        path_dmd / f"{var}/modes_real",
+                    )
+                    shutil.move(
+                        path_dmd / f"{var}/modes_imag_2",
+                        path_dmd / f"{var}/modes_imag",
+                    )
+                    self.save_prediction(variables, path_dmd=path_dmd, end=slice_size)
+
+                df_new = dd.concat(
+                    [
+                        dd.read_parquet(
+                            path_mrdmd / f"level_{level}/{i}/{var}/prediction"
+                        )
+                        for i in range(2**level)
+                    ],
+                    axis=1,
+                )
+                df_new.columns = df.columns
+                df -= df_new
+                df.to_parquet(
+                    path_mrdmd / f"level_{level}/{var}/level_prediction",
+                    compression="snappy",
+                    write_metadata_file=True,
+                )
+                # del df_new, df_i, df, dfs, time, rho
+
+    def multires_predict(self, variables, path_mrdmd=".mrdmd", end=None):
+        variables = variables if type(variables) is list else [variables]
+        for var in variables:
+            path_mrdmd = Path.cwd() / path_mrdmd
+
+            # discover the number of levels
+            levels = 0
+            while True:
+                if not (path_mrdmd / f"level_{levels}").exists():
+                    break
+                levels += 1
+            print(f"Number of levels: {levels}")
+            predictions = []
+            for level in range(levels):
+                prediction = dd.read_parquet(
+                    path_mrdmd / f"level_{level}/{var}/level_prediction"
+                )
+                predictions.append(prediction)
+
+            prediction_df = predictions[0]
+            for i in range(1, len(predictions)):
+                prediction_df += predictions[i]
+
+            for level in range(levels):
+                shutil.copy(
+                    path_mrdmd / f"level_0/0/x.pkl", path_mrdmd / f"level_{level}"
+                )
+                shutil.copy(
+                    path_mrdmd / f"level_0/0/y.pkl", path_mrdmd / f"level_{level}"
+                )
+
+            # prediction_df = dd.from_dask_array(df_sum)
+            # prediction_df.columns = prediction_df.columns.astype(str)
+            prediction_df.repartition(npartitions=20)
+            prediction_df.to_parquet(
+                path_mrdmd / f"{var}/prediction",
+                compression="snappy",
+                write_metadata_file=True,
+            )
+
+    def viz_multires(
+        self,
+        variables,
+        num_frames=0,
+        path_mrdmd=".mrdmd",
+        path_viz=".viz",
+        bounds="auto",
+        coordinates="2D",
+        dist=None,
+        vmax="auto",
+        vmin="auto",
+    ):
+        variables = variables if type(variables) is list else [variables]
+        path_mrdmd = Path.cwd() / path_mrdmd
+        path_viz = Path.cwd() / path_viz
+
+        levels = 0
+        while True:
+            if not (path_mrdmd / f"level_{levels}").exists():
+                break
+            levels += 1
+        print(f"Number of levels: {levels}")
+
+        for var in variables:
+            for level in range(levels):
+                self.viz_parquet(
+                    variables,
+                    num_frames=num_frames,
+                    path_data=path_mrdmd / f"level_{level}",
+                    folder_name="",
+                    folder_name2=None,
+                    path_viz=path_viz / f"level_{level}",
+                    bounds=bounds,
+                    coordinates=coordinates,
+                    dist=dist,
+                    vmax=vmax,
+                    vmin=vmin,
+                )
