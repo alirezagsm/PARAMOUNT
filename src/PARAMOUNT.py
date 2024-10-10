@@ -1,14 +1,16 @@
 import os
 import shutil
+import psutil
 from pathlib import Path
 import logging
 import numpy as np
 import pandas as pd
 from dask import delayed
-from dask.distributed import Client, LocalCluster
+from dask.distributed import Client, LocalCluster, wait
 import dask.dataframe as dd
 import dask.array as da
 import re
+
 from src.utils import utils
 from tqdm import tqdm
 
@@ -37,9 +39,19 @@ class Base:
             tuple: cluster, client
         """
 
+        total_memory = psutil.virtual_memory().total
+        core_count = psutil.cpu_count(logical=True)
+
+        n_workers = max(6, core_count // 3)  # Number of workers
+        threads_per_worker = 2  # Number of threads per worker
+        memory_limit = f"{total_memory / 2**30}GB"  # Memory per worker = total_memory (over allocated)
+
         cluster = LocalCluster(
             dashboard_address="localhost:8000",
-            silence_logs=logging.CRITICAL,
+            n_workers=n_workers,
+            threads_per_worker=threads_per_worker,
+            memory_limit=memory_limit,
+            silence_logs=logging.WARN,
         )
         client = Client(cluster)
 
@@ -97,7 +109,9 @@ class Base:
                 print(f"{path_csv.name} {result.shape}")
 
     @staticmethod
-    def get_folderlist(path=".data", boolPrint=True):
+    def get_folderlist(
+        path=".data", boolPrint=True, ignoreStack=False, onlyStack=False
+    ):
         """
         get_folderlist get list of folders in a given path
 
@@ -114,6 +128,16 @@ class Base:
 
         folderlist = [f for f in files.iterdir() if f.is_dir()]
         folderlist = [folder.parts[-1] for folder in folderlist]
+        if ignoreStack:
+            folderlist = [
+                folder for folder in folderlist if folder.split("_")[0] != "stack"
+            ]
+        if onlyStack:
+            if ignoreStack:
+                print("WARNING: ignoreStack flag is ignored")
+            folderlist = [
+                folder for folder in folderlist if folder.split("_")[0] == "stack"
+            ]
         if boolPrint:
             print(pd.DataFrame({"Available folders": folderlist}))
         return folderlist
@@ -136,7 +160,7 @@ class Base:
 
         Args:
             variables (list): list of variables to consider
-            coordiantes (str): catresian coordinates to store e.g. 2D for 'xy' and 3D for 'xyz'.
+            coordinates (str): Cartesian coordinates to store e.g. 2D for 'xy' and 3D for 'xyz'.
             path_csv (_type_, optional): Path to folder contining CSV files. Defaults to Path.cwd().
             path_parquet (str, optional): Path to save parquet database in. Defaults to ".data".
             i_start (int, optional): index for first CSV file. Defaults to 0.
@@ -155,15 +179,7 @@ class Base:
         utils.ensure_dir(path_parquet)
 
         v_ = variables.copy()
-        for var in variables:
-            if var in self.get_folderlist(path=path_parquet, boolPrint=False):
-                choice = input(
-                    f"{var.strip()} folder already exists! overwrite existing files? [y/n] "
-                )
-                if choice.lower().strip() == "y":
-                    shutil.rmtree(Path.cwd() / path_parquet / var)
-                else:
-                    v_.remove(var)
+        v_ = self.overwrite_guard(path_parquet, v_)
         variables = v_
 
         pathlist = sorted(Path(path_csv).resolve().glob("*.csv"))
@@ -286,7 +302,7 @@ class Base:
         Args:
             path_csv (str, optional): path to csv database. Defaults to Path.cwd().
             path_save (str, optional): path to save resutls to. Defaults to ".data".
-            delimiter (str, optional): elimiter used in csv files. Defaults to ",".
+            delimiter (str, optional): delimiter used in csv files. Defaults to ",".
             skiprows (int, optional):  rows to skip in csv files. Defaults to 0.
         """
         pathlist = sorted(Path(path_csv).resolve().glob("*.csv"))
@@ -313,7 +329,7 @@ class Base:
     @staticmethod
     def fft_signal(signal, dt, path_save=Path.cwd(), fmax=3000):
         """
-        fft_signal produce fast fourier transform plot of a given signal
+        fft_signal produce fast Fourier transform plot of a given signal
 
         Args:
             signal (Series): raw data
@@ -559,7 +575,7 @@ class Base:
 
     def set_time(self, dt, t0=0):
         """
-        set_time set timestep and initial time of data acquisiton
+        set_time set timestep and initial time of data acquisition
 
         Args:
             dt (float): timestep
@@ -577,6 +593,17 @@ class Base:
         self.t0 = t0
 
     def data_decimate(self, df, X1=False, X2=False):
+        """
+        data_decimate preprocess a DataFrame by applying various transformations such as cutting off columns, skipping
+        columns, and slicing columns based on certain conditions
+
+        Args:
+            df : The DataFrame to be decimated
+            X1 (bool, optional): flag to determine if the last column should be excluded.
+            X2 (bool, optional): flag to determine if the first column should be excluded.
+        Returns:
+            df
+        """
         try:
             self.data_cutoff
         except:
@@ -778,12 +805,29 @@ class POD(Base):
         super().__init__(show_dashboard)
         self.set_viz_params()
 
+    def overwrite_guard(self, path, variables):
+        remove_vars = []
+        for var in variables:
+            if var in self.get_folderlist(path=path, boolPrint=False):
+                choice = input(
+                    f"{var.strip()} folder already exists! overwrite existing files? [y/n] "
+                )
+                if choice.lower().strip() == "y":
+                    shutil.rmtree(Path.cwd() / path / var)
+                else:
+                    remove_vars.append(var)
+
+        for var in remove_vars:
+            variables.remove(var)
+
+        return variables
+
     def svd_save_usv(
         self,
         variables,
         path_parquet=".data",
         path_pod=".usv",
-        dmd_flag=False,
+        dmd_X1=False,
         in_memory_df=None,
     ):
         """
@@ -793,6 +837,8 @@ class POD(Base):
             variables (list or str): list of variables to consider
             path_parquet (str, optional): path to parquet datasets. Defaults to ".data".
             path_pod (str, optional): path to store SVD results in. Defaults to ".usv".
+            dmd_X1 (bool, optional): ignored that last snapshot for the DMD procedure. Defaults to False.
+            in_memory_df (dataframe, optional): use the in_memory_df instead of reading it from disk. Defaults to None.
 
         Raises:
             ValueError: checking for existing folders and warn user about unwanted overwrites
@@ -800,15 +846,7 @@ class POD(Base):
         variables = variables if type(variables) is list else [variables]
         v_ = variables.copy()
         if in_memory_df is None:
-            for var in variables:
-                if var in self.get_folderlist(path=path_pod, boolPrint=False):
-                    choice = input(
-                        f"{var.strip()} folder already exists! overwrite existing files? [y/n] "
-                    )
-                    if choice.lower().strip() == "y":
-                        shutil.rmtree(Path.cwd() / path_pod / var)
-                    else:
-                        v_.remove(var)
+            v_ = self.overwrite_guard(path_pod, v_)
         variables = v_
 
         try:
@@ -825,7 +863,7 @@ class POD(Base):
                 df = dd.read_parquet(path, engine="pyarrow")
             else:
                 df = in_memory_df
-            df = self.data_decimate(df, X1=dmd_flag)
+            df = self.data_decimate(df, X1=dmd_X1)
             u, s, v = da.linalg.svd(df.values)
 
             for name, item in zip(["u", "v"], [u, v]):
@@ -841,7 +879,9 @@ class POD(Base):
                     compression="snappy",
                     write_metadata_file=True,
                 )
-                del result
+                self.client.cancel(result)  # free up memory
+
+            del result, u, v  # free up memory
             result = dd.from_array(s).compute()
             utils.saveit(result, f"{path_pod}/{var}/s.pkl")
 
@@ -939,16 +979,20 @@ class POD(Base):
         indexskip = int((maxmode + 1) / 5)
         ax.xaxis.set_minor_formatter(
             FuncFormatter(
-                lambda x, pos: f"{x % maxmode:.0f}"
-                if (x % maxmode) in np.arange(0, maxmode - 1, indexskip)
-                else ""
+                lambda x, pos: (
+                    f"{x % maxmode:.0f}"
+                    if (x % maxmode) in np.arange(0, maxmode - 1, indexskip)
+                    else ""
+                )
             )
         )
         ax.yaxis.set_minor_formatter(
             FuncFormatter(
-                lambda x, pos: f"{x % maxmode:.0f}"
-                if (x % maxmode) in np.arange(0, maxmode - 1, indexskip)
-                else ""
+                lambda x, pos: (
+                    f"{x % maxmode:.0f}"
+                    if (x % maxmode) in np.arange(0, maxmode - 1, indexskip)
+                    else ""
+                )
             )
         )
         ax.xaxis.remove_overlapping_locs = False
@@ -1064,16 +1108,20 @@ class POD(Base):
             indexskip = int((maxmode + 1) / 5)
             ax.xaxis.set_minor_formatter(
                 FuncFormatter(
-                    lambda x, pos: f"{x % maxmode:.0f}"
-                    if (x % maxmode) in np.arange(0, maxmode - 1, indexskip)
-                    else ""
+                    lambda x, pos: (
+                        f"{x % maxmode:.0f}"
+                        if (x % maxmode) in np.arange(0, maxmode - 1, indexskip)
+                        else ""
+                    )
                 )
             )
             ax.yaxis.set_minor_formatter(
                 FuncFormatter(
-                    lambda x, pos: f"{x % maxmode:.0f}"
-                    if (x % maxmode) in np.arange(0, maxmode - 1, indexskip)
-                    else ""
+                    lambda x, pos: (
+                        f"{x % maxmode:.0f}"
+                        if (x % maxmode) in np.arange(0, maxmode - 1, indexskip)
+                        else ""
+                    )
                 )
             )
             ax.xaxis.remove_overlapping_locs = False
@@ -1204,9 +1252,11 @@ class POD(Base):
             indexskip = int((maxmode + 1) / 5)
             ax.yaxis.set_minor_formatter(
                 FuncFormatter(
-                    lambda x, pos: f"{x % maxmode:.0f}"
-                    if (x % maxmode) in np.arange(0, maxmode - 1, indexskip)
-                    else ""
+                    lambda x, pos: (
+                        f"{x % maxmode:.0f}"
+                        if (x % maxmode) in np.arange(0, maxmode - 1, indexskip)
+                        else ""
+                    )
                 )
             )
             ax.xaxis.remove_overlapping_locs = True
@@ -1319,7 +1369,7 @@ class POD(Base):
         path_viz=".viz",
     ):
         """
-        s_viz_combined visualization of all s energy values in one plot shown as cumulative contibutions
+        s_viz_combined visualization of all s energy values in one plot shown as cumulative contributions
 
         Args:
             variables (list or str): list of variables to consider
@@ -1499,7 +1549,19 @@ class POD(Base):
             display(savebutton, fig)
 
     def u_viz(
-        self, x, y, u, path_viz, modelist, bounds, dist, dist_map, vmax=None, vmin=None
+        self,
+        x,
+        y,
+        u,
+        path_viz,
+        modelist,
+        bounds,
+        dist,
+        dist_map,
+        vmax=None,
+        vmin=None,
+        cbar=False,
+        cbar_label="value",
     ):
         """
         u_viz 2D visualization of SVD mode shapes
@@ -1517,6 +1579,8 @@ class POD(Base):
         """
         from scipy.interpolate import griddata
         import matplotlib.pyplot as plt
+        from mpl_toolkits.axes_grid1 import make_axes_locatable
+        import matplotlib.ticker as ticker
 
         plt.switch_backend("agg")
         plt.rc("font", family=self.font)
@@ -1568,7 +1632,6 @@ class POD(Base):
                     self.contour_levels,
                     cmap=self.cmap,
                     antialiased=True,
-                    extend="both",
                 )
             else:
                 contour = ax.contourf(
@@ -1578,10 +1641,30 @@ class POD(Base):
                     self.contour_levels,
                     cmap=self.cmap,
                     antialiased=True,
-                    extend="both",
                     vmax=vmax,
                     vmin=vmin,
                 )
+
+            nonlocal cbar
+            if cbar:
+                divider = make_axes_locatable(ax)
+                cax = divider.append_axes("right", size="5%", pad="4%")
+                cbar = fig.colorbar(contour, cax=cax)
+                cbar.ax.set_xlabel(cbar_label)
+                ticklabs = cbar.ax.get_yticklabels()
+
+                for t in ticklabs:
+                    t.set_horizontalalignment("right")
+                    t.set_x(5.5)
+
+                # Set scientific notation for ticks
+                formatter = ticker.ScalarFormatter(useMathText=False)
+                formatter.set_scientific(True)
+                formatter.set_powerlimits((0, 0))
+                cbar.ax.yaxis.set_major_formatter(formatter)
+                cbar.ax.yaxis.get_offset_text().set_position((0.5, 0))
+                cbar.ax.yaxis.offsetText.set_ha("center")
+
             for c in contour.collections:
                 c.set_edgecolor("face")
             fig.tight_layout()
@@ -1778,15 +1861,33 @@ class POD(Base):
         )
         plt.close("all")
 
+    # def multiscale(
+    #     self, variables, path_parquet=".data", path_mpod=".mpod", levels=5, freq_max=3000
+    # ):
+    #     variables = variables if type(variables) is list else [variables]
+    #     path_mpod = Path.cwd() / path_mpod
+
+    #     for var in tqdm(variables, "computing mPOD modes and coefficients"):
+    #         df = dd.read_parquet(f"{path_parquet}/{var}", engine="pyarrow")
+    #         Keep = np.array([1, 1, 1, 1])
+    #         Nf = np.array([201, 201, 201, 201])
+    #         F_V = [freq_max/levels*i for i in range(1, levels+1)]
+    #         F_Bank_r = F_V * 2 * self.dt
+    #         M = len(F_Bank_r)
+    #         Ex = 103
+    #         K = np.dot(df.values.T, df.values)
+    #         for m in range(M):
+    #             if m<1:
+
 
 class DMD(POD):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-    def stack(self, variables, path_parquet=".data",stack_idx=None):
+    def stack(self, variables, path_parquet=".data", stack_idx=None):
         variables = variables if type(variables) is list else [variables]
         if len(variables) == 1:
-            print("only one variable found, no stacking required")
+            print("only one variable found, stacking not possible")
             return
         if stack_idx is not None:
             vars = [variables[i] for i in stack_idx]
@@ -1795,23 +1896,17 @@ class DMD(POD):
         for var in vars[1:]:
             path_var = Path.cwd() / path_parquet / f"{var}"
             df2 = dd.read_parquet(path_var, engine="pyarrow")
-            df = dd.concat([df, df2], axis=0)
-        stack_name = ""
-        for var in vars:
-            length = 2
-            while True:
-                truncated_names = [v[:length] for v in variables if v != var]
-                if var[:length] not in truncated_names:
-                    stack_name += "_"
-                    stack_name += var[:length]
-                    break
-                length += 1
+            df = dd.concat(
+                [df.loc[:: len(variables)], df2.loc[:: len(variables)]], axis=0
+            )
+
+        stack_name = "_".join(vars)
+        self.stack_name = f"stack_{len(vars)}_{stack_name}"
         df.to_parquet(
-            f"{path_parquet}/{len(vars)}{stack_name}",
+            f"{path_parquet}/{self.stack_name}",
             compression="snappy",
             write_metadata_file=True,
         )
-        
 
     def save_Atilde(
         self,
@@ -1825,19 +1920,11 @@ class DMD(POD):
         save_Atilde compute Atilde matrix.
         """
         variables = variables if type(variables) is list else [variables]
-        _v = variables.copy()
+        v_ = variables.copy()
 
         if in_memory_df is None:
-            for var in variables:
-                if var in self.get_folderlist(path=path_dmd, boolPrint=False):
-                    choice = input(
-                        f"{var.strip()} folder already exists! overwrite existing files? [y/n] "
-                    )
-                    if choice.lower().strip() == "y":
-                        shutil.rmtree(Path.cwd() / path_dmd / var)
-                    else:
-                        _v.remove(var)
-        variables = _v
+            v_ = self.overwrite_guard(path_dmd, v_)
+        variables = v_
 
         try:
             shutil.copy(Path.cwd() / path_parquet / "x.pkl", path_dmd)
@@ -2008,18 +2095,25 @@ class DMD(POD):
             )
 
     def describe_parquet(
-        self, variables, path_data=".data", folder_name="", folder_name2=None
+        self,
+        variables,
+        path_data=".data",
+        folder_name="",
+        path_data2=None,
+        folder_name2=None,
     ):
         variables = variables if type(variables) is list else [variables]
         for var in tqdm(variables, "describing variables"):
-            df = dd.read_parquet(f"{path_data}/{var}/{folder_name}", engine="pyarrow")
+            data = dd.read_parquet(f"{path_data}/{var}/{folder_name}", engine="pyarrow")
 
             if folder_name2 is not None:
-                df2 = dd.read_parquet(
-                    f"{path_data}/{var}/{folder_name2}", engine="pyarrow"
+                if path_data2 is None:
+                    path_data2 = path_data
+                data2 = dd.read_parquet(
+                    f"{path_data2}/{var}/{folder_name2}", engine="pyarrow"
                 )
-                df = df - df2
-            df = df.compute()
+                data = data.map_partitions(lambda a, b: a - b, data2)
+            data = data.compute()
 
             def remove_outliers(df):
                 df = df.transpose()
@@ -2031,19 +2125,28 @@ class DMD(POD):
                     lower_bound = Q1 - 1.5 * IQR
                     upper_bound = Q3 + 1.5 * IQR
                     mask = (df.loc[index] < lower_bound) | (df.loc[index] > upper_bound)
-                    df.loc[index][mask] = np.nan
+                    df.loc[index, mask] = np.nan
                 df = df.transpose()
                 return df
 
             # print(df.mean(axis=1).describe())
-            df = remove_outliers(df)
-            print(df.mean(axis=1).describe())
+            data = remove_outliers(data)
+            print(data.mean(axis=0).describe())
+            if folder_name2 is None:
+                with open(f"{path_data}/{var}/{folder_name}/description.txt", "w") as f:
+                    f.write(data.mean(axis=0).describe().to_string())
+            else:
+                with open(
+                    f"{path_data}/{var}/{folder_name}/description_diff.txt", "w"
+                ) as f:
+                    f.write(data.mean(axis=0).describe().to_string())
 
     def viz_error(
         self, variables, path_data=".data1", path_dmd=".data2", path_viz=".viz"
     ):
         variables = variables if type(variables) is list else [variables]
         for var in tqdm(variables, "prediction error calculation"):
+
             utils.ensure_dir(f"{path_viz}/{var}")
             path_pq1 = Path.cwd() / path_data / f"{var}"
             path_pq2 = Path.cwd() / path_dmd / f"{var}" / "prediction"
@@ -2057,6 +2160,12 @@ class DMD(POD):
 
             df1 = df1.to_dask_array()
             df2 = df2.to_dask_array()
+
+            if var.startswith("stack"):
+                varnum = int(var.split("_")[1])
+                idx_end = df2.shape[1] // varnum
+                df2[:, :idx_end]
+
             # make df2 same shape as df1
             # Root Mean Square Error (RMSE)
             # rmse = da.mean((df1 - df2) ** 2, axis=0).compute()**0.5
@@ -2070,12 +2179,14 @@ class DMD(POD):
             # Mean Absolute Error (MAE)
             mae = da.mean(da.abs(df1 - df2), axis=0).compute()
             error = mae
+            utils.saveit(error, f"{path_dmd}/{var}/mae.pkl")
 
             import matplotlib.pyplot as plt
             import matplotlib.ticker as mtick
 
             plt.rc("font", family=self.font)
             plt.rc("font", size=self.fontsize)
+            plt.switch_backend("agg")
             fig, ax = plt.subplots(1)
             fig.set_size_inches(self.width, self.height)
             fig.patch.set_facecolor("w")
@@ -2085,6 +2196,8 @@ class DMD(POD):
             # ax.yaxis.set_major_formatter(mtick.PercentFormatter())
             ax.set_axisbelow(True)
             ax.grid(alpha=0.5, which="both")
+            ax.grid(alpha=0.3, which="minor", linewidth=self.linewidth * 0.75)
+            ax.yaxis.set_minor_locator(mtick.LogLocator(numticks=999, subs="auto"))
 
             # ax.set_ylim(
             #     rmse.min() - 10, rmse[int(self.data_cutoff * rmse.shape[0] / 100)] + 40
@@ -2114,12 +2227,110 @@ class DMD(POD):
             )
             plt.close("all")
 
+    def viz_error_combined(self, variables, path_dmd=".data2", path_viz=".viz"):
+        variables = variables if type(variables) is list else [variables]
+        utils.ensure_dir(path_viz)
+
+        error_combined = pd.DataFrame(columns=variables)
+        path_error = Path.cwd() / path_dmd / f"{variables[0]}" / "mae.pkl"
+        _data = utils.loadit(path_error)
+        cutoff_index = self.data_cutoff * _data.shape[0] // 100
+        for var in variables:
+            path_error = Path.cwd() / path_dmd / f"{var}" / "mae.pkl"
+            error_combined[var] = utils.loadit(path_error)
+
+        import matplotlib.pyplot as plt
+        import matplotlib.ticker as mtick
+
+        plt.rc("font", family=self.font)
+        plt.rc("font", size=self.fontsize)
+
+        plt.switch_backend("agg")
+        clrs_list = ["k", "b", "g", "r"]
+        styl_list = ["-", "--", "-.", ":"]
+
+        fig, ax = plt.subplots(1)
+        fig.set_size_inches(self.width, self.height)
+        fig.patch.set_facecolor("w")
+        ax.set_xlabel("snapshots")
+        ax.set_ylabel("MAE")
+        ax.set_yscale("log")
+        ax.set_axisbelow(True)
+
+        ax.grid(alpha=0.5, which="both")
+        ax.grid(alpha=0.3, which="minor", linewidth=self.linewidth * 0.75)
+        ax.yaxis.set_minor_locator(mtick.LogLocator(numticks=999, subs="auto"))
+
+        ax.set_xlim(0, error_combined.shape[0])
+        yspan = error_combined.max().max() - error_combined.min().min()
+        padding = 0.1 * yspan
+        ax.set_ylim(
+            max(error_combined.min().min(), error_combined.min().min() - padding),
+            error_combined.max().max() + padding,
+        )
+        ax.axvline(
+            self.data_cutoff * error_combined.shape[0] // 100 - 1,
+            color="grey",
+            linestyle="--",
+            linewidth=1,
+        )
+
+        for i, var in enumerate(error_combined.columns):
+            label = re.sub(r"\[(.*?)\]", "", var)  # remove units between brackets
+            label = re.sub(r"\.", " ", label)  # remove dots
+            if label.startswith("stack"):
+                first = f"{label.split('_')[2]}".strip()
+                rest = [x.strip() for x in label.split("_")[3:]]
+                label = f"{first} w/ {', '.join(rest)}"
+                label = label.replace("Velocity u, Velocity v, Velocity w", "Velocity")
+            clrr = clrs_list[i // len(clrs_list)]
+            styl = styl_list[i % len(styl_list)]
+            ax.plot(
+                error_combined[var],
+                linewidth=self.linewidth,
+                label=label,
+                color=clrr,
+                ls=styl,
+            )
+
+        ax.legend(fontsize="small")
+
+        fig.tight_layout()
+        for axis in ["bottom", "left"]:
+            ax.spines[axis].set_linewidth(self.ax_width)
+        for axis in ["top", "right"]:
+            ax.spines[axis].set_linewidth(0)
+
+        plt.savefig(
+            f"{path_viz}/mae_combined_full" + ".png", dpi=self.dpi, bbox_inches="tight"
+        )
+
+        ax.set_xlim(cutoff_index, error_combined.shape[0])
+        yspan = (
+            error_combined.iloc[cutoff_index:, :].max().max()
+            - error_combined.iloc[cutoff_index:, :].min().min()
+        )
+        padding = 0.1 * yspan
+        ax.set_ylim(
+            max(
+                error_combined.iloc[cutoff_index:, :].min().min(),
+                error_combined.iloc[cutoff_index:, :].min().min() - padding,
+            ),
+            error_combined.iloc[cutoff_index:, :].max().max() + padding,
+        )
+        plt.savefig(
+            f"{path_viz}/mae_combined_post" + ".png", dpi=self.dpi, bbox_inches="tight"
+        )
+
+        plt.close("all")
+
     def viz_parquet(
         self,
         variables,
         num_frames=None,
         path_data=".dmd",
         folder_name="",
+        path_data2=None,
         folder_name2=None,
         path_viz=".viz",
         bounds="auto",
@@ -2130,19 +2341,12 @@ class DMD(POD):
     ):
         variables = variables if type(variables) is list else [variables]
 
+        variables = self.overwrite_guard(path_viz, variables)
         for var in tqdm(variables, "predicting variables"):
-            if var in self.get_folderlist(Path.cwd() / path_viz, boolPrint=False):
-                choice = input(
-                    f"{var.strip()} folder already exists! overwrite existing files? [y/n] "
-                )
-                if choice.lower().strip() == "y":
-                    shutil.rmtree(f"{path_viz}/{var}")
             utils.ensure_dir(f"{path_viz}/{var}")
-            # load prediction_df
-            path_dmd_values = Path.cwd() / path_data / f"{var}"
-            prediction = dd.read_parquet(
-                f"{path_dmd_values}/{folder_name}", engine="pyarrow"
-            )
+
+            path = Path.cwd() / path_data / f"{var}"
+            data = dd.read_parquet(f"{path}/{folder_name}", engine="pyarrow")
 
             self.make_dim(coordinates)
 
@@ -2158,32 +2362,39 @@ class DMD(POD):
                 if dist:
                     dist_map = self.dist_map(x, y, bounds)
 
+            # if a second path is provided, visualize the difference
             if folder_name2 is not None:
-                prediction2 = dd.read_parquet(
-                    f"{path_dmd_values}/{folder_name2}", engine="pyarrow"
-                )
-                prediction = prediction - prediction2
+                if path_data2 is None:
+                    path_data2 = path_data
+                path2 = Path.cwd() / path_data2 / f"{var}"
+                data2 = dd.read_parquet(f"{path2}/{folder_name2}", engine="pyarrow")
+                data = data.map_partitions(lambda a, b: a - b, data2)
 
-            # visualize prediction snapshots
+            # visualize data snapshots
             if num_frames is None:
-                modelist = range(0, prediction.shape[1])
+                modelist = range(0, data.shape[1])
             else:
-                modelist = np.linspace(0, prediction.shape[1] - 1, num_frames).astype(
-                    int
-                )
-            vmax = prediction.iloc[:, 0].max().compute() if vmax == "auto" else vmax
-            vmin = prediction.iloc[:, 0].min().compute() if vmin == "auto" else vmin
+                modelist = np.linspace(0, data.shape[1] - 1, num_frames).astype(int)
+            vmax_val = data.iloc[:, -1].max().compute() if vmax == "auto" else vmax
+            vmin_val = data.iloc[:, -1].min().compute() if vmin == "auto" else vmin
+            match = re.search(r"\[(.*?)\]", var)
+            if match:
+                cbar_label = match.group(1)
+            else:
+                cbar_label = " "
             self.u_viz(
                 x,
                 y,
-                prediction.compute(),
+                data.compute(),
                 f"{path_viz}/{var}",
                 modelist,
                 bounds,
                 dist,
                 dist_map,
-                vmax=vmax,
-                vmin=vmin,
+                vmax=vmax_val,
+                vmin=vmin_val,
+                cbar=True,
+                cbar_label=cbar_label,
             )
             self.animate(
                 Path.cwd() / f"{path_viz}/{var}",
@@ -2256,12 +2467,20 @@ class DMD(POD):
                 ax.spines[axis].set_linewidth(0)
             plt.show()
             plt.savefig(
-                f"{path_viz}/{var}/eig_z" + ".png", dpi=self.dpi, bbox_inches="tight"
+                f"{path_viz}/{var}/eig_z" + ".png",
+                dpi=self.dpi,
+                bbox_inches="tight",
             )
             plt.close("all")
 
     def viz_eigs_spectrum(
-        self, variables, path_dmd=".dmd", path_viz=".viz", maxmode=None, freq_max=3000
+        self,
+        variables,
+        path_dmd=".dmd",
+        path_pod=".pod",
+        path_viz=".viz",
+        maxmode=None,
+        freq_max=3000,
     ):
         variables = variables if type(variables) is list else [variables]
         import matplotlib.pyplot as plt
@@ -2277,27 +2496,26 @@ class DMD(POD):
             utils.ensure_dir(f"{path_viz}/{var}")
             eigs = utils.loadit(f"{path_dmd}/{var}/lambda.pkl")
             b = utils.loadit(f"{path_dmd}/{var}/b.pkl")
-            
-
+            s = utils.loadit(f"{path_pod}/{var}/s.pkl")
 
             fig, ax = plt.subplots(1)
             fig.set_size_inches(self.width, self.height)
             fig.patch.set_facecolor("w")
             ax.set_xlabel("Frequency [Hz]")
-            ax.set_ylabel("Power Spectral Density [|b|/Hz]")
+            ax.set_ylabel("Power Spectrum [$|$b$|$/Hz]")
             ax.grid(alpha=0.5)
             ax.set_xlim(0, freq_max)
+            ax.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
 
-            freqs = np.abs(np.imag(np.log(eigs)/self.dt/2/np.pi))
+            freqs = np.imag(np.log(eigs) / self.dt / 2 / np.pi)  # frequency in Hz
             idx = np.argsort(freqs)
-            Pxx = np.abs(b)[idx]
+            Pxx = np.abs(b) * 2 / np.sqrt(s.values)  # scaled magnitude according to s
             freqs = freqs[idx]
-            Pxx[0] = 0
-            Pxx[1] = 0
-            Pxx = Pxx[freqs < freq_max]
-            freqs = freqs[freqs < freq_max]
-            dbPxx = 10 * np.log10(Pxx)
-            peaks, _ = find_peaks(Pxx, prominence=3, distance=50)
+            Pxx = Pxx[idx]
+            Pxx = Pxx[(0 < freqs) & (freqs < freq_max)]
+            freqs = freqs[(0 < freqs) & (freqs < freq_max)]
+            maxval = np.max(Pxx)
+            peaks, _ = find_peaks(Pxx, prominence=maxval / 15, distance=50)
             ax.plot(freqs, Pxx, self.color, linewidth=self.linewidth)
             npeaks = 4
             for n in range(0, min(npeaks, len(peaks))):
@@ -2324,34 +2542,153 @@ class DMD(POD):
             for axis in ["top", "right"]:
                 ax.spines[axis].set_linewidth(0)
             plt.savefig(
-                f"{path_viz}/{var}/eig_PSD" + ".png", dpi=self.dpi, bbox_inches="tight"
+                f"{path_viz}/{var}/eig_PS" + ".png",
+                dpi=self.dpi,
+                bbox_inches="tight",
             )
             plt.close("all")
+
+    def viz_eigs_spectrum_combined(
+        self,
+        variables,
+        path_dmd=".dmd",
+        path_pod=".pod",
+        path_viz=".viz",
+        maxmode=None,
+        freq_max=3000,
+    ):
+        variables = variables if type(variables) is list else [variables]
+        import matplotlib.pyplot as plt
+        import matplotlib.ticker as mtick
+        from matplotlib.colors import Normalize
+        import matplotlib.mlab as mlab
+        from scipy.signal import find_peaks
+        from scipy.signal import convolve
+
+        plt.switch_backend("agg")
+        plt.rc("font", family=self.font)
+        plt.rc("font", size=self.fontsize)
+
+        def gaussian_kernel(x, sigma):
+            return np.exp(-0.5 * (x / sigma) ** 2) / (sigma * np.sqrt(2 * np.pi))
+
+        eigs_combined = 0
+        df_combined = pd.DataFrame()
+
+        for var in tqdm(variables, "plotting DMD modes eigenvalues PSD"):
+            utils.ensure_dir(f"{path_viz}/{var}")
+            _eig = utils.loadit(f"{path_dmd}/{var}/lambda.pkl")
+            _b = utils.loadit(f"{path_dmd}/{var}/b.pkl")
+            _s = utils.loadit(f"{path_pod}/{var}/s.pkl")
+            eigs_combined += _eig
+            df_combined[var] = (
+                np.abs(_b) * 2 / np.sqrt(_s.values)
+            )  # scaled magnitude according to s
+
+        df_combined["freqs"] = np.imag(
+            np.log(eigs_combined) / self.dt / 2 / np.pi
+        )  # frequency in Hz
+        df_combined = df_combined.sort_values(by="freqs")
+        df_combined = df_combined[
+            (0 < df_combined["freqs"]) & (df_combined["freqs"] < freq_max)
+        ]
+        sigma = 1.0
+        kernel_size = 25  # Define the size of the kernel
+        x = np.linspace(-3 * sigma, 3 * sigma, kernel_size)
+        kernel = gaussian_kernel(x, sigma)
+
+        for col in df_combined.columns:
+            if col != "freqs":
+                df_combined[col] = convolve(df_combined[col], kernel, mode="same")
+
+        freqs = df_combined["freqs"].values
+        df_combined.drop(columns=["freqs"], inplace=True)
+        Pxx = df_combined.prod(axis=1).values
+
+        fig, ax = plt.subplots(1)
+        fig.set_size_inches(self.width, self.height)
+        fig.patch.set_facecolor("w")
+        ax.set_xlabel("Frequency [Hz]")
+        ax.set_ylabel("Power Spectrum [$|$b$|$/Hz]")
+        ax.grid(alpha=0.5)
+        ax.set_xlim(0, freq_max)
+        ax.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
+        # ax.set_yscale("log")
+
+        maxval = np.max(Pxx)
+        peaks, _ = find_peaks(Pxx, prominence=maxval / 2, distance=50)
+        ax.plot(freqs, Pxx, self.color, linewidth=self.linewidth)
+
+        npeaks = 1
+        for n in range(0, min(npeaks, len(peaks))):
+            ax.scatter(
+                freqs[peaks[n]],
+                Pxx[peaks[n]],
+                s=80,
+                facecolors="none",
+                edgecolors="grey",
+            )
+            acc = 0
+            if freq_max < 10:
+                acc = 2
+            ax.annotate(
+                f"{freqs[peaks[n]]:0.{acc}f}",
+                xy=(
+                    freqs[peaks[n]] + freq_max / 25,
+                    Pxx[peaks[n]] * 0.99,
+                ),
+            )
+        fig.tight_layout()
+        for axis in ["bottom", "left"]:
+            ax.spines[axis].set_linewidth(self.ax_width)
+        for axis in ["top", "right"]:
+            ax.spines[axis].set_linewidth(0)
+        plt.savefig(
+            f"{path_viz}/eig_PS_combined" + ".png",
+            dpi=self.dpi,
+            bbox_inches="tight",
+        )
+        plt.close("all")
 
     def viz_modes(
         self,
         variables,
-        modelist,
+        modelist=None,
+        freqlist=None,
         coordinates="2D",
         path_dmd=".dmd",
         path_viz=".viz",
         bounds="auto",
         dist=False,
-        frequency=None,
     ):
         variables = variables if type(variables) is list else [variables]
-        modelist = modelist if type(modelist) is list else list(modelist)
+
+        if modelist is not None:
+            modelist = modelist if type(modelist) is list else list(modelist)
+        if freqlist is not None:
+            freqlist = freqlist if type(freqlist) is list else list(freqlist)
+            if modelist is not None:
+                print("please either provide modelist or freqlist")
+                return
 
         self.make_dim(coordinates)
 
         for var in tqdm(variables, "analyzing variables"):
             utils.ensure_dir(f"{path_viz}/{var}")
 
-            if frequency is not None:
-                eigs = utils.loadit(f"{path_dmd}/{var}/lambda.pkl")
-                omega = np.log(eigs) / self.dt
-                idx = (np.abs(np.abs(omega) - 2 * np.pi * frequency)).argmin()
-                modelist = [idx]
+            eigs = utils.loadit(f"{path_dmd}/{var}/lambda.pkl")
+            freqs = np.imag(np.log(eigs) / self.dt / 2 / np.pi)
+
+            if freqlist is not None:
+                modelist = []
+                for f in freqlist:
+                    diffs = abs(freqs - f)
+                    sorted_indices = np.argsort(diffs)
+                    closest_indices = sorted_indices[:3]
+                    for idx in closest_indices:
+                        modelist.append(idx)
+
+            freq_lookup = {idx: freqs[idx] for idx in modelist}
 
             if self.dim == "xy":
                 path_x = f"{path_dmd}/x.pkl"
@@ -2422,7 +2759,7 @@ class DMD(POD):
                 for axis in ["top", "bottom", "left", "right"]:
                     ax.spines[axis].set_linewidth(self.ax_width)
                 plt.savefig(
-                    f"{path_viz}/{var}/dmd_mode{mode}" + ".png",
+                    f"{path_viz}/{var}/mode_{mode}_freq_{freq_lookup[mode]}" + ".png",
                     dpi=self.dpi,
                     bbox_inches="tight",
                 )
@@ -2462,7 +2799,7 @@ class DMD(POD):
                         variables,
                         path_parquet=path_parquet,
                         path_pod=path_pod,
-                        dmd_flag=True,
+                        dmd_X1=True,
                         in_memory_df=df_i,
                     )
                     self.save_Atilde(
