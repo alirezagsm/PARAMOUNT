@@ -1,9 +1,8 @@
-from src.PARAMOUNT import POD
+from src.PARAMOUNT_POD import POD
 
 
 def main():
     """
-
     Read csv datasets and generate parquet database for desired variables.
 
     Parameters Used
@@ -17,7 +16,6 @@ def main():
     varlist: list of variables to consider
 
     POD(): initialize a dask cluster on local system
-
     """
 
     path_csv = r".rawdata"

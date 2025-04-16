@@ -1,13 +1,16 @@
 {
-    "terminal.integrated.env.osx": {
-        "PYTHONPATH": "${workspaceFolder}/",
-    },
-    "terminal.integrated.env.linux": {
-        "PYTHONPATH": "${workspaceFolder}/",
-    },
-    "terminal.integrated.env.windows": {
-        "PYTHONPATH": "${workspaceFolder}/",
-    },
-    "jupyter.notebookFileRoot": "${workspaceFolder}/",
-    "python.defaultInterpreterPath": "{workspaceFolder}/.venv/Scripts/python.exe"
+	"terminal.integrated.env.osx": {
+		"PYTHONPATH": "${workspaceFolder}/"
+	},
+	"terminal.integrated.env.linux": {
+		"PYTHONPATH": "${workspaceFolder}/"
+	},
+	"terminal.integrated.env.windows": {
+		"PYTHONPATH": "${workspaceFolder}/"
+	},
+	"jupyter.notebookFileRoot": "${workspaceFolder}/",
+	"python.defaultInterpreterPath": "{workspaceFolder}/.venv/Scripts/python.exe",
+	"lldb.displayFormat": "auto",
+	"lldb.dereferencePointers": true,
+	"lldb.consoleMode": "evaluate"
 }
