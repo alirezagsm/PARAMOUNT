@@ -4,7 +4,7 @@
 </h1>
 
 <p align="left">
-PARAMOUNT is a Python package developed at the University of Twente for performing **Proper Orthogonal Decomposition (POD)** and **Dynamic Mode Decomposition (DMD)** on large numerical and experimental datasets. Leverage the power of parallel processing to analyze massive amounts of data efficiently. A brief video introduction into the theory and methodology is presented [here](https://youtu.be/uz0q_TKrC84).
+PARAMOUNT is a Python package developed at the University of Twente for performing Proper Orthogonal Decomposition (POD) and Dynamic Mode Decomposition (DMD) on large numerical and experimental datasets. Leverage the power of parallel processing to analyze massive amounts of data efficiently. A brief video introduction into the theory and methodology is presented [here](https://youtu.be/uz0q_TKrC84).
 </p>
 
 # Features
@@ -14,9 +14,9 @@ PARAMOUNT is a Python package developed at the University of Twente for performi
 
   - Perform distributed computation of POD to extract dominant spatial patterns.
   - Example Application: PARAMOUNT has been used to analyze large datasets from numerical simulations of a swirl burner. For details, see:
+
   > Alireza Ghasemi, et al. "Combustion Dynamics Analysis of a Pressurized Airblast Swirl Burner Using Proper Orthogonal Decomposition." *International Journal of Spray and Combustion Dynamics*, 2023. [DOI:10.1177/17568277231207252](http://journals.sagepub.com/doi/10.1177/17568277231207252)
   >
-
 - **Dynamic Mode Decomposition (DMD):**
 
   - Compute DMD modes, eigenvalues, and generate future state predictions.
@@ -41,7 +41,7 @@ PARAMOUNT is a Python package developed at the University of Twente for performi
    - PARAMOUNT provides several visualization tools based on Matplotlib. Refer to the example files for guidance on how to use them.
    - 3D data can be interactively visualized with Plotly. See `viz_example` for instructions on how to utilize this feature.
 
-**Proposed Project Folder Structure:**</br>
+**Proposed Project Folder Structure:**`</br>`
 This is a sample project structure for using the PARAMOUNT library to perform POD and DMD analysis.
 
 ```
