@@ -8,7 +8,7 @@ import dask.array as da
 from dask import delayed
 from tqdm import tqdm
 import re
-import src.utils as utils
+from src.utils import utils as utils
 
 
 class POD(Base):
@@ -124,16 +124,6 @@ class POD(Base):
             df = self.data_decimate(df, X1=dmd_X1)
             u, s, v = da.linalg.svd(df.values)
 
-            for name, item in zip(["u", "v"], [u, v]):
-                result = dd.from_array(item)
-                result.columns = result.columns.astype(str)
-                dd.to_parquet(
-                    result,
-                    f"{path_pod}/{var}/{name}",
-                    compression="snappy",
-                    write_metadata_file=True,
-                )
-                self.client.cancel(result)  # free up memory
             utils.save_to_parquet(u, f"{path_pod}/{var}/u", column_dtype=str)
             utils.save_to_parquet(v, f"{path_pod}/{var}/v", column_dtype=str)
             result = dd.from_array(s).compute()
@@ -1003,21 +993,21 @@ class POD(Base):
             nonlocal cbar
             if cbar:
                 divider = make_axes_locatable(ax)
-                cax = divider.append_axes("right", size="5%", pad="4%")
+                cax = divider.append_axes("right", size="4%", pad="4%")
                 cbar = fig.colorbar(contour, cax=cax)
                 cbar.ax.set_xlabel(cbar_label, loc="left")
-                ticklabs = cbar.ax.get_yticklabels()
 
+                ticklabs = cbar.ax.get_yticklabels()
                 for t in ticklabs:
-                    t.set_horizontalalignment("right")
-                    t.set_x(5.5)
+                    t.set_horizontalalignment("left")
 
                 formatter = ticker.ScalarFormatter(useMathText=False)
                 formatter.set_scientific(True)
                 formatter.set_powerlimits((-3, 3))
                 cbar.ax.yaxis.set_major_formatter(formatter)
                 cbar.ax.yaxis.set_tick_params(pad=6)
-                cbar.ax.yaxis.offsetText.set_ha("center")
+                cbar.ax.yaxis.offsetText.set_ha("right")
+                cbar.ax.xaxis.set_label_coords(0, -0.1)
 
             contour.set_edgecolor("face")
             fig.tight_layout()
@@ -1154,7 +1144,7 @@ class POD(Base):
         mode_energy = [x / sum(mode_energy) * 100 for x in mode_energy]
         cumsum = np.cumsum(mode_energy)
         s = cumsum[:maxmode]
-        ax.set_ylim(s[0] - 10, 100)
+        ax.set_ylim(s[0] - 10, 100.5)
         ax.set_xlim(0, maxmode)
         ax.plot(s, self.color, linewidth=self.linewidth)
         fig.tight_layout()
