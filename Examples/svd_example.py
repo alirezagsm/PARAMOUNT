@@ -39,7 +39,7 @@ def main():
     pod.svd_save_usv(
         variables,
         path_parquet=path_parquet,
-        path_results_pod=path_results_pod,
+        path_pod=path_results_pod,
     )
 
     # Step 2: Visualize SVD results
@@ -51,7 +51,7 @@ def main():
         modelist,
         bounds=bounds,
         coordinates=coordinates,
-        path_results_pod=path_results_pod,
+        path_pod=path_results_pod,
         path_viz=path_viz,
         freq_max=freq_max,
         dist=2.5e-4 * 13,
@@ -60,7 +60,7 @@ def main():
     pod.s_viz_combined(
         variables,
         maxmode=100,
-        path_results_pod=path_results_pod,
+        path_pod=path_results_pod,
         path_viz=path_viz,
     )
 
@@ -76,22 +76,22 @@ def main():
     pod.svd_correlation(
         variables,
         maxmode=modelist,
-        path_results_pod=path_results_pod,
+        path_pod=path_results_pod,
         path_viz=path_viz,
     )
 
     pod.svd_correlation_2X(
         variables,
         maxmode=modelist,
-        path_results_pod=path_results_pod,
-        path_results_pod2=path_results_pod2,
+        path_pod=path_results_pod,
+        path_pod2=path_results_pod2,
         path_viz=path_viz,
     )
 
     pod.svd_correlation_signals(
         variables,
         maxmode=modelist,
-        path_results_pod=path_results_pod,
+        path_pod=path_results_pod,
         path_signals=path_signals,
         path_viz=path_viz,
     )
