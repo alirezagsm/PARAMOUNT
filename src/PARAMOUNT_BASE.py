@@ -8,7 +8,7 @@ import dask.dataframe as dd
 from dask.distributed import Client, LocalCluster
 from tqdm import tqdm
 from pathlib import Path
-import src.utils as utils
+from src.utils import utils as utils
 
 
 class Base:
@@ -202,15 +202,24 @@ class Base:
 
         try:
             for item in df.columns:
-                if re.match(r"\s*" + "x", item, re.IGNORECASE):
+                # Handle x coordinate (x, Points:0, Point 0, Points_0, pt0, etc.)
+                if re.match(r"\s*" + "x", item, re.IGNORECASE) or re.search(
+                    r"p[ot].*0", item, re.IGNORECASE
+                ):
                     variables.remove(item)
                     if "x" in self.dim:
                         utils.saveit(df[item], f"{path_parquet}/x.pkl")
-                if re.match(r"\s*" + "y", item, re.IGNORECASE):
+                # Handle y coordinate (y, Points:1, Point 1, Points_1, pt1, etc.)
+                elif re.match(r"\s*" + "y", item, re.IGNORECASE) or re.search(
+                    r"p[ot].*1", item, re.IGNORECASE
+                ):
                     variables.remove(item)
                     if "y" in self.dim:
                         utils.saveit(df[item], f"{path_parquet}/y.pkl")
-                if re.match(r"\s*" + "z", item, re.IGNORECASE):
+                # Handle z coordinate (z, Points:2, Point 2, Points_2, pt2, etc.)
+                elif re.match(r"\s*" + "z", item, re.IGNORECASE) or re.search(
+                    r"p[ot].*2", item, re.IGNORECASE
+                ):
                     variables.remove(item)
                     if "z" in self.dim:
                         utils.saveit(df[item], f"{path_parquet}/z.pkl")
@@ -227,11 +236,10 @@ class Base:
         for i, var in enumerate(tqdm(variables, "writing parquet database")):
             df = dd.concat(results[i], axis=1, ignore_unknown_divisions=True)
             df.columns = [path.stem for path in pathlist]
-            dd.to_parquet(
+            utils.save_to_parquet(
                 df.repartition(partition_size="150MB", force=True),
-                f"{path_parquet}/{var.strip()}",
-                compression="snappy",
-                write_metadata_file=True,
+                path=f"{path_parquet}/{utils.sanitize_name(var)}",
+                imaginary_part=True,
             )
 
     @staticmethod
