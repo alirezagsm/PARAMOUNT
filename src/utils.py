@@ -84,6 +84,16 @@ class utils:
             return pickle.load(f)
 
     @staticmethod
+    def sanitize_name(name: str) -> str:
+        """Remove any characters that are not alphanumeric, underscores, or hyphens from name"""
+        import re
+
+        sanitized_name = re.sub(r"[^\w\-]", "_", name)
+        if not sanitized_name:
+            raise ValueError("Sanitized name cannot be empty")
+        return sanitized_name.strip()
+
+    @staticmethod
     def ensure_dir(path):
         """ensures that the directory exists"""
         import os
@@ -138,6 +148,8 @@ class utils:
         import pandas as pd
 
         if isinstance(df, da.Array):
+            if any(dim is None or pd.isna(dim) for dim in df.shape):
+                df = df.compute_chunk_sizes()
             df = dd.from_dask_array(df)
 
         if isinstance(df, pd.DataFrame):
