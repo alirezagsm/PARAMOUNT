@@ -4,13 +4,13 @@ PARAMOUNT is a lightweight Python toolkit for computing _Proper Orthogonal Decom
 
 ## Overview
 
--   **Distributed Processing:** Ideal for multi-core parallel processing of large data.
--   **Methodology:** A brief video introduction to the theory is available [here](https://www.youtube.com/watch?v=uz0q_TKrC84).
+- **Distributed Processing:** Ideal for multi-core parallel processing of large data.
+- **Methodology:** A brief video introduction to the theory is available [here](https://www.youtube.com/watch?v=uz0q_TKrC84).
 
 ### Proper Orthogonal Decomposition (POD)
 
--   Perform distributed computation of POD to extract dominant spatial patterns.
--   Accompanying research paper:
+- Perform distributed computation of POD to extract dominant spatial patterns.
+- Accompanying research paper:
 
 <p align="center"><img src="demo_pod.png" alt="POD demo" style="width:60%; max-width:720px; height:auto;"></p>
 
@@ -18,9 +18,9 @@ PARAMOUNT is a lightweight Python toolkit for computing _Proper Orthogonal Decom
 
 ### Dynamic Mode Decomposition (DMD)
 
--   Compute DMD modes, eigenvalues, and generate future state predictions.
--   Multi-resolution DMD (MRDMD) to analyze data across various temporal scales.
--   Accompanying research paper:
+- Compute DMD modes, eigenvalues, and generate future state predictions.
+- Multi-resolution DMD (MRDMD) to analyze data across various temporal scales.
+- Accompanying research paper:
 
 <p align="center"><img src="demo_dmd.png" alt="DMD demo" style="width:60%; max-width:720px; height:auto;"></p>
 
@@ -28,61 +28,68 @@ PARAMOUNT is a lightweight Python toolkit for computing _Proper Orthogonal Decom
 
 ### Visualization
 
--   Easily visualize POD/DMD modes and coefficients using Matplotlib.
--   3D data can be visualized interactively with Plotly.
+- Easily visualize POD/DMD modes and coefficients using Matplotlib.
+- 3D data can be visualized interactively with Plotly.
 
 ## Using PARAMOUNT
 
 1. **Installation**
 
-    ```bash
-    pip install -r requirements.txt
-    ```
-
+   ```bash
+   pip install -r requirements.txt
+   ```
 2. **Data Preparation**
 
-    - PARAMOUNT works well with CSV datasets and can convert them to Parquet for better performance.
-    - Specify variables of interest and convert to Parquet. See `csv_example` for details.
+   - PARAMOUNT works well with CSV datasets and can convert them to Parquet for better performance.
+   - The domain coordinates `x/y/z.pkl` are inferred based on input CSV data.
+   - Specify variables of interest and convert to Parquet. See `csv_example` for details.
 
-    ```python
-    # Convert your data into parquet format
-    pod = POD()
-    pod.csv_to_parquet(...)
-    ```
-
+   ```python
+   # Convert your data into parquet format
+   pod = POD()
+   variables = POD.get_folderlist(...)
+   pod.csv_to_parquet(...)
+   ```
 3. **Analysis (POD / DMD / MRDMD)**
 
-    - For POD: use the `POD` class to compute SVD from Parquet datasets. Results (U, S, V) are stored. See `svd_example`.
+   - Vertex distance `dist` may be set to mask out external regions within the domain bounding box.
+   - Other parameters such as timestep `dt` and maximum analysis frequency `freq_max` can be specified.
+   - For POD: use the `POD` class to compute SVD from Parquet datasets. Results (U, S, V) are stored. See `svd_example`.
 
-    ```python
-    pod.svd_save_usv(...)
-    ```
+   ```python
+   pod.svd_save_usv(...)
+   ```
 
-    - For DMD: use the `DMD` class to compute dynamic modes and eigenvalues. See `dmd_example`.
+   - For DMD: use the `DMD` class to compute dynamic modes and eigenvalues. See `dmd_example`.
 
-    ```python
-    dmd = DMD()
-    dmd.save_Atilde(...)
-    dmd.save_modes(...)
-    dmd.save_prediction(...)
-    ```
+   ```python
+   dmd = DMD()
+   dmd.save_Atilde(...)
+   dmd.save_modes(...)
+   dmd.save_prediction(...)
+   ```
 
-    - For MRDMD: use `MRDMD` utilities. See `mrdmd_example`.
+   - For MRDMD: use `MRDMD` utilities. See `mrdmd_example`.
 
-    ```python
-    dmd.multires(...)
-    dmd.multires_predict(...)
-    ```
-
+   ```python
+   dmd.multires(...)
+   dmd.multires_predict(...)
+   ```
 4. **Visualization**
 
-    - Examples using Matplotlib and Plotly are provided in the `Examples/` folder. See `viz_example`.
+   - Visualization parameters can be customized.
+   ```python
+   pod.set_time(dt)
+   pod.set_viz_params(dpi=600, linewidth=0.85, color="black", cmap="seismic")
+   ```
+   - 2D visualization methods for each analysis are included in the provided sample scripts.
+   - Interactive 3D visualization of results can be performed similar to the provided `3D_viz_example.ipynb`.
 
 ## Proposed Project Folder Structure
 
 This is a sample project structure for using the PARAMOUNT library to perform POD and DMD analysis.
 
-```md
+```
 Project
 ├── myproject.py
 ├── .data
@@ -123,5 +130,5 @@ Project
 
 ## Notes and Acknowledgements
 
-If you use PARAMOUNT in published work, please cite the relevant paper. \
+If you use PARAMOUNT in published work, please cite the relevant paper. 
 This toolkit is developed by [Alireza Ghasemi](https://www.linkedin.com/in/alirezaaghasemi/) at University of Twente under the [MAGISTER](https://www.magister-itn.eu/) project.
