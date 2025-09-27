@@ -7,7 +7,7 @@ import dask.array as da
 import numpy as np
 import pandas as pd
 import re
-import src.utils as utils
+from src.utils import utils as utils
 
 
 class DMD(POD):
