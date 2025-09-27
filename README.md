@@ -1,4 +1,9 @@
-# PARAMOUNT: Parallel Modal Analysis of Large Datasets
+<h2 align="center">
+    <div>
+    PARAMOUNT
+    </div>
+    Parallel Modal Analysis of Large Datasets
+</h2>
 
 PARAMOUNT is a lightweight Python toolkit for computing _Proper Orthogonal Decomposition (POD)_ and _Dynamic Mode Decomposition (DMD)_ on large numerical and experimental datasets. It leverages parallel processing to analyze large amounts of data efficiently.
 
