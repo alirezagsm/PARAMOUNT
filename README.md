@@ -132,5 +132,5 @@ Project
 
 ## Notes and Acknowledgements
 
-If you use PARAMOUNT in published work, please cite the relevant paper. \
+If you use PARAMOUNT in published work, please cite the relevant associated paper. \
 This toolkit is developed by [Alireza Ghasemi](https://www.linkedin.com/in/alirezaaghasemi/) at University of Twente under the [MAGISTER](https://www.magister-itn.eu/) project.
