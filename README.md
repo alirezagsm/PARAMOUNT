@@ -78,10 +78,12 @@ PARAMOUNT is a lightweight Python toolkit for computing _Proper Orthogonal Decom
 4. **Visualization**
 
    - Visualization parameters can be customized.
+
    ```python
    pod.set_time(dt)
    pod.set_viz_params(dpi=600, linewidth=0.85, color="black", cmap="seismic")
    ```
+
    - 2D visualization methods for each analysis are included in the provided sample scripts.
    - Interactive 3D visualization of results can be performed similar to the provided `3D_viz_example.ipynb`.
 
@@ -130,5 +132,5 @@ Project
 
 ## Notes and Acknowledgements
 
-If you use PARAMOUNT in published work, please cite the relevant paper. 
+If you use PARAMOUNT in published work, please cite the relevant paper. \
 This toolkit is developed by [Alireza Ghasemi](https://www.linkedin.com/in/alirezaaghasemi/) at University of Twente under the [MAGISTER](https://www.magister-itn.eu/) project.
